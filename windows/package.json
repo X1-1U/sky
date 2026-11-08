@@ -1,0 +1,74 @@
+{
+  "name": "sky",
+  "productName": "Sky",
+  "version": "1.0.0",
+  "description": "Sky — mihomo 代理工具",
+  "main": "src/main.js",
+  "author": "onsunday",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win --x64"
+  },
+  "devDependencies": {
+    "electron": "^38.8.6",
+    "electron-builder": "^26.18.0"
+  },
+  "dependencies": {
+    "htm": "^3.1.1",
+    "preact": "^10.29.8"
+  },
+  "build": {
+    "appId": "com.onsunday.sky",
+    "productName": "Sky",
+    "copyright": "onsunday",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "build/icon.png",
+      "build/tray.png",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/mihomo.exe",
+        "to": "core/mihomo.exe"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "signAndEditExecutable": false,
+      "artifactName": "Sky-${version}-win-x64.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "Sky",
+      "artifactName": "Sky-Setup-${version}.exe",
+      "installerLanguages": [
+        "zh_TW"
+      ],
+      "language": "1028"
+    }
+  }
+}
