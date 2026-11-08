@@ -4,7 +4,7 @@ struct NodesView: View {
     @EnvironmentObject var s: AppState
     @State private var search = ""
     @State private var filter = 0            // 0 全部 1 收藏 2 低延遲
-    @State private var provider = "*"
+    @State private var groupSel: String?
     @State private var selected: String?
     @State private var sortByDelay = false
     @State private var showAdd = false
@@ -12,9 +12,13 @@ struct NodesView: View {
 
     struct EditLink: Identifiable { let id = UUID(); let index: Int; var text: String }
 
+    /// 目前在看的策略組（預設主要策略組）
+    var group: String { groupSel.flatMap { s.groups.contains($0) ? $0 : nil } ?? s.mainGroup }
+    var groupNow: String? { s.proxies[group]?.now }
+    var canSelect: Bool { s.proxies[group]?.type == "Selector" }
+
     var filtered: [NodeItem] {
-        var list = s.nodes
-        if provider != "*" { list = list.filter { $0.provider == provider } }
+        var list = s.members(of: group)
         if filter == 1 { list = list.filter { s.store.favorites.contains($0.name) } }
         if filter == 2 { list = list.filter { ($0.delay ?? 0) > 0 && ($0.delay ?? 0) < 150 } }
         if !search.isEmpty { list = list.filter { $0.name.localizedCaseInsensitiveContains(search) || $0.type.localizedCaseInsensitiveContains(search) } }
@@ -29,9 +33,9 @@ struct NodesView: View {
     }
 
     var body: some View {
-        let all = s.nodes
+        let all = s.members(of: group)
         let list = filtered
-        let detailName = selected ?? s.currentNode
+        let detailName = selected ?? groupNow
         let detail = all.first { $0.name == detailName } ?? list.first
 
         VStack(alignment: .leading, spacing: 20) {
@@ -41,10 +45,10 @@ struct NodesView: View {
                         PageTitle(title: "節點")
                         StatusPill(text: s.systemProxyOn ? "已連線" : "未連線", on: s.systemProxyOn)
                     }
-                    Text("選擇連線節點").font(.system(size: 17)).foregroundColor(T.text.opacity(0.8))
+                    Text(s.profileSub.map { "使用訂閱「\($0.name)」的策略組" } ?? "選擇連線節點").font(.system(size: 17)).foregroundColor(T.text.opacity(0.8))
                 }
                 Spacer()
-                Button { s.testAllDelays() } label: {
+                Button { s.testGroup(group) } label: {
                     Label(s.testingDelay ? "測試中…" : "測試延遲", systemImage: "gauge.with.dots.needle.33percent")
                 }
                 .buttonStyle(GhostButton())
@@ -60,7 +64,9 @@ struct NodesView: View {
                 Chip(title: "低延遲", selected: filter == 2) { filter = 2 }
                 Spacer(minLength: 0)
                 Rectangle().fill(T.line).frame(width: 1, height: 36)
-                Dropdown(options: [("*", "全部訂閱")] + providerOptions, selection: $provider).frame(minWidth: 160, maxWidth: 380)
+                Dropdown(options: s.groups.map { g in (g, groupLabel(g)) },
+                         selection: Binding(get: { group }, set: { groupSel = $0; selected = nil }))
+                    .frame(minWidth: 180, maxWidth: 380)
             }
 
             HStack(alignment: .top, spacing: 20) {
@@ -136,14 +142,15 @@ struct NodesView: View {
         }
     }
 
-    private var providerOptions: [(String, String)] {
-        var o = s.store.subscriptions.filter(\.enabled).map { ($0.providerName, $0.name) }
-        if !s.store.localLinks.isEmpty { o.append((ConfigBuilder.localProvider, "本機節點")) }
-        return o
+    private func groupLabel(_ g: String) -> String {
+        let now = s.proxies[g]?.now.map { " · " + Flags.cleanName($0) } ?? ""
+        return (g == s.mainGroup ? "★ " : "") + g + now
     }
 
     private func status(_ n: NodeItem) -> (String, TagKind) {
-        if n.name == s.currentNode { return ("使用中", .solidGreen) }
+        if n.name == groupNow { return ("使用中", .solidGreen) }
+        if s.isGroup(n.name) { return ("策略組", .gray) }
+        if n.name == "DIRECT" || n.name == "REJECT" { return ("內建", .gray) }
         guard let d = n.delay else { return ("未測試", .gray) }
         return d == 0 ? ("逾時", .red) : ("可用", .green)
     }
@@ -166,7 +173,7 @@ struct NodesView: View {
             Text(n.delay == nil ? "—" : Fmt.delay(n.delay)).monospacedDigit().frame(width: 90, alignment: .leading)
             Tag(text: st.0, kind: st.1).frame(width: 100, alignment: .leading)
             Menu {
-                Button("使用此節點") { s.select(n.name) }
+                if canSelect { Button("使用此節點") { s.select(n.name, in: group) } }
                 Button("測試延遲") { s.testDelay(n.name) }
                 Button(fav ? "取消收藏" : "加入收藏") { s.toggleFavorite(n.name) }
             } label: {
@@ -185,14 +192,14 @@ struct NodesView: View {
         .overlay(alignment: .bottom) { if !isDetail { Divider().overlay(T.line).padding(.horizontal, 14) } }
         .contentShape(Rectangle())
         .onTapGesture { selected = n.name }
-        .onTapGesture(count: 2) { s.select(n.name) }
+        .onTapGesture(count: 2) { if canSelect { s.select(n.name, in: group) } }
     }
 
     @ViewBuilder
     private func detailPanel(_ n: NodeItem?) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             if let n {
-                let inUse = n.name == s.currentNode
+                let inUse = n.name == groupNow
                 let fav = s.store.favorites.contains(n.name)
                 HStack(alignment: .top) {
                     FlagView(name: n.name, size: 28)
@@ -200,8 +207,10 @@ struct NodesView: View {
                         Text(Flags.cleanName(n.name)).font(.system(size: 26, weight: .medium)).lineLimit(2)
                         if inUse {
                             Tag(text: "使用中", kind: .green)
+                        } else if canSelect {
+                            Button("使用此節點") { s.select(n.name, in: group) }.buttonStyle(GhostButton(compact: true))
                         } else {
-                            Button("使用此節點") { s.select(n.name) }.buttonStyle(GhostButton(compact: true))
+                            Tag(text: "此策略組自動選擇", kind: .gray)
                         }
                     }
                     Spacer()
@@ -234,7 +243,7 @@ struct NodesView: View {
                 .background(T.bg.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(T.line))
 
-                let addr = NodeDetails.lookup(name: n.name, file: ConfigBuilder.providerFile(n.provider, workDir: s.workDir))
+                let addr = s.detailFile(for: n).flatMap { NodeDetails.lookup(name: n.name, file: $0) }
                 VStack(spacing: 0) {
                     Button { s.page = .subscriptions } label: {
                         HStack {

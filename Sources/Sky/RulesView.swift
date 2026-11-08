@@ -27,11 +27,16 @@ struct RulesView: View {
                           selection: Binding(get: { s.store.settings.mode }, set: { s.setMode($0) }))
                     .frame(minWidth: 220, maxWidth: 340)
                 Rectangle().fill(T.line).frame(width: 1, height: 36)
-                Text("預設策略：").font(.system(size: 17)).fixedSize()
-                Dropdown(options: RulePolicy.allCases.map { ($0, $0.rawValue) },
-                         selection: Binding(get: { s.store.settings.defaultPolicy },
-                                            set: { s.store.settings.defaultPolicy = $0; Task { await s.applyConfig() } }))
-                    .frame(minWidth: 130, maxWidth: 200)
+                if let prof = s.profileSub {
+                    Label("使用訂閱「\(prof.name)」的規則，你的規則優先", systemImage: "doc.text")
+                        .font(.system(size: 15)).foregroundColor(T.text.opacity(0.85)).lineLimit(1)
+                } else {
+                    Text("預設策略：").font(.system(size: 17)).fixedSize()
+                    Dropdown(options: RulePolicy.allCases.map { ($0, $0.rawValue) },
+                             selection: Binding(get: { s.store.settings.defaultPolicy },
+                                                set: { s.store.settings.defaultPolicy = $0; Task { await s.applyConfig() } }))
+                        .frame(minWidth: 130, maxWidth: 200)
+                }
                 Spacer(minLength: 0)
                 SearchField(placeholder: "搜尋規則", text: $search).frame(minWidth: 160, maxWidth: 340)
             }
@@ -83,11 +88,30 @@ struct RulesView: View {
                     s.store.rules.move(fromOffsets: from, toOffset: to)
                     Task { await s.applyConfig() }
                 }
-                matchRow
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                    .moveDisabled(true)
+                if let prof = s.profileSub {
+                    let subRules = s.profileRules(prof)
+                    HStack {
+                        Image(systemName: "doc.text").foregroundColor(T.mute)
+                        Text("以下是訂閱「\(prof.name)」的 \(subRules.count) 條規則（唯讀，隨訂閱更新）")
+                        Spacer()
+                    }
+                    .font(.system(size: 14, weight: .medium)).foregroundColor(T.text.opacity(0.85))
+                    .padding(.horizontal, 16).frame(height: 44)
+                    .background(T.header)
+                    .listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear).moveDisabled(true)
+                    ForEach(Array(subRules.enumerated()), id: \.offset) { i, raw in
+                        if search.isEmpty || raw.localizedCaseInsensitiveContains(search) {
+                            subRuleRow(s.store.rules.count + i + 1, raw)
+                                .listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear).moveDisabled(true)
+                        }
+                    }
+                } else {
+                    matchRow
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .moveDisabled(true)
+                }
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
@@ -125,6 +149,29 @@ struct RulesView: View {
         .overlay(alignment: .bottom) { Divider().overlay(T.line) }
         .contentShape(Rectangle())
         .onTapGesture { selectedID = r.id; draft = r; dirty = false }
+    }
+
+    /// 訂閱規則一列：TYPE,內容,策略（AND/OR 這類複合規則整串顯示）
+    private func subRuleRow(_ n: Int, _ raw: String) -> some View {
+        let parts = raw.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        let compound = raw.hasPrefix("AND") || raw.hasPrefix("OR") || raw.hasPrefix("NOT") || raw.hasPrefix("SUB-RULE")
+        let type = parts.first ?? ""
+        let payload = compound ? raw : (parts.count > 2 ? parts[1] : (type == "MATCH" ? "其他連線" : ""))
+        let target = compound ? (parts.last ?? "") : (parts.count > 2 ? parts[2] : (parts.count == 2 ? parts[1] : ""))
+        return HStack(spacing: 0) {
+            Color.clear.frame(width: 44)
+            Text("\(n)").monospacedDigit().frame(width: 50, alignment: .leading)
+            Color.clear.frame(width: 90)
+            Text(compound ? (type.split(separator: ",").first.map(String.init) ?? type) : type).lineLimit(1).frame(width: 170, alignment: .leading)
+            Text(payload).lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading).help(raw)
+            Tag(text: target, kind: target == "REJECT" ? .red : (target == "DIRECT" || target.contains("直连") || target.contains("直連") ? .gray : .green))
+                .lineLimit(1).frame(width: 120, alignment: .leading)
+        }
+        .font(.system(size: 16))
+        .foregroundColor(T.text.opacity(0.75))
+        .padding(.horizontal, 10)
+        .frame(height: 54)
+        .overlay(alignment: .bottom) { Divider().overlay(T.line) }
     }
 
     private var matchRow: some View {

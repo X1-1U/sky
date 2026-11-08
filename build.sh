@@ -52,6 +52,8 @@ cat > "$APP/Contents/Info.plist" <<'P'
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSLocationUsageDescription</key><string>Sky 需要定位權限才能讀取目前連線的 Wi-Fi 名稱，用來依 Wi-Fi 自動切換代理。</string>
+<key>NSLocationWhenInUseUsageDescription</key><string>Sky 需要定位權限才能讀取目前連線的 Wi-Fi 名稱，用來依 Wi-Fi 自動切換代理。</string>
 </dict></plist>
 P
 codesign --force --sign - "$APP/Contents/Resources/mihomo"

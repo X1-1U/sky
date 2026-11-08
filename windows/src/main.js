@@ -11,6 +11,7 @@ const IS_WIN = process.platform === 'win32';
 const REPO = 'X1-1U/sky';                       // App 更新來源（GitHub Releases）
 const CORE_REPO = 'MetaCubeX/mihomo';
 const { PROXY_GROUP, AUTO_GROUP, LOCAL } = config;
+const { ProfileText } = require('./profile');
 
 // ---------- 單一實例 ----------
 if (!process.env.SKY_HOME && !app.requestSingleInstanceLock()) { app.exit(0); process.exit(0); }
@@ -42,6 +43,7 @@ function defaultStore() {
       mixedPort: 7899, controllerPort: 9099, secret: crypto.randomBytes(16).toString('hex'),
       allowLan: false, autoConnect: false, logLevel: 'info', mode: 'rule', defaultPolicy: '代理',
       testURL: 'https://www.gstatic.com/generate_204', tun: false, autoCheckUpdates: true,
+      ssidEnabled: false, ssidRules: [],
     },
   };
 }
@@ -62,6 +64,7 @@ const S = {
   coreReady: false, coreVersion: '', coreError: null, systemProxyOn: false, connectedSince: null,
   busy: false, proxies: {}, providers: {}, connections: [], activeCount: 0, down: 0, up: 0,
   history: [], pausedConnections: false, testingDelay: false, updatingSubs: [], toast: null,
+  mainGroup: PROXY_GROUP, profileId: null, currentSSID: null,
   isAdmin: false, tunActive: false, appUpdate: null, coreUpdate: null, checking: false, coreUpdating: false,
 };
 let connHistory = {};          // id → [{t, down, up}]
@@ -85,6 +88,7 @@ function snapshot() {
   return {
     ...S, store, platform: process.platform, appVersion: app.getVersion(), workDir,
     connHistory: watchConn ? (connHistory[watchConn] || []) : [],
+    subCounts: Object.fromEntries(store.subscriptions.map((x) => [x.id, subNodeCount(x)])),
   };
 }
 function push() { if (win && !win.isDestroyed()) win.webContents.send('state', snapshot()); updateTray(); }
@@ -109,7 +113,10 @@ const enc = encodeURIComponent;
 function useTun() { return store.settings.tun && (!IS_WIN || S.isAdmin); }
 
 function writeConfig() {
-  fs.writeFileSync(configPath, config.build(store, workDir, { tun: useTun() }));
+  const b = config.build(store, workDir, { tun: useTun() });
+  S.mainGroup = b.mainGroup;
+  S.profileId = b.profile?.id || null;
+  fs.writeFileSync(configPath, b.yaml);
   const r = cp.spawnSync(coreBinary(), ['-t', '-d', workDir, '-f', configPath], { encoding: 'utf8', windowsHide: true });
   if (r.error) return { ok: false, msg: '無法執行核心：' + r.error.message };
   if (r.status === 0) return { ok: true };
@@ -166,7 +173,7 @@ async function startCore() {
   }
   if (!S.coreReady) { S.coreError = '核心沒有回應：' + tailLog(3); push(); return; }
   S.tunActive = useTun();
-  try { await api(`/proxies/GLOBAL`, { method: 'PUT', body: { name: PROXY_GROUP } }); } catch {}
+  try { await api(`/proxies/GLOBAL`, { method: 'PUT', body: { name: S.mainGroup } }); } catch {}
   lastTotals = null;
   setProxyForApp(true);
   await refreshProxies();
@@ -193,7 +200,7 @@ async function applyConfig() {
     if (S.tunActive !== useTun()) { await stopCore(); await startCore(); return; }
     try { await api('/configs', { method: 'PUT', query: { force: 'true' }, body: { path: configPath }, timeout: 60000 }); S.coreError = null; }
     catch (e) { S.coreError = '重新載入失敗：' + e.message; }
-    try { await api(`/proxies/GLOBAL`, { method: 'PUT', body: { name: PROXY_GROUP } }); } catch {}
+    try { await api(`/proxies/GLOBAL`, { method: 'PUT', body: { name: S.mainGroup } }); } catch {}
     await refreshProxies();
     refreshSubStatuses();
   } finally { S.busy = false; push(); }
@@ -257,7 +264,7 @@ async function tick() {
 }
 
 function currentNode() {
-  let n = S.proxies[PROXY_GROUP]?.now;
+  let n = S.proxies[S.mainGroup]?.now;
   for (let i = 0; i < 5 && n && S.proxies[n]?.now; i++) n = S.proxies[n].now;
   return n;
 }
@@ -268,6 +275,9 @@ async function loop() {
     await tick();
     if (n % 5 === 0) await refreshProxies();
     if (n % 60 === 30) { const c = currentNode(); if (c && c !== 'DIRECT') delay(c).catch(() => {}); }
+    if (n % 60 === 45) autoUpdateSubscriptions();
+    if (n % 300 === 20) refreshEmptyRuleProviders();
+    if (n % 5 === 2) checkSSID().catch(() => {});
     n++;
     push();
     await new Promise((r) => setTimeout(r, 1000));
@@ -280,51 +290,137 @@ async function delay(name) {
   } catch {}
 }
 
-function nodes() {
-  const out = []; const seen = new Set();
-  const order = store.subscriptions.map(config.providerName).concat([LOCAL]);
-  for (const key of order) {
-    const p = S.providers[key];
-    if (!p || !['HTTP', 'File'].includes(p.vehicleType)) continue;
-    for (const x of p.proxies || []) {
-      if (seen.has(x.name)) continue;
-      seen.add(x.name);
-      out.push(x.name);
-    }
-  }
-  return out;
+const GROUP_TYPES = new Set(['Selector', 'URLTest', 'Fallback', 'LoadBalance', 'Relay']);
+
+/** 規則集第一次下載失敗時主動補抓（mihomo 預設要等更新間隔才重試） */
+async function refreshEmptyRuleProviders() {
+  if (!S.coreReady) return;
+  let provs; try { provs = (await api('/providers/rules')).providers || {}; } catch { return; }
+  await Promise.all(Object.entries(provs).filter(([, p]) => !p.ruleCount).map(([n]) =>
+    api(`/providers/rules/${enc(n)}`, { method: 'PUT', timeout: 30000 }).catch(() => {})));
 }
 
-function subNodeCount(sub) { return S.providers[config.providerName(sub)]?.proxies?.length || 0; }
+function subNodeCount(sub) {
+  const file = config.subFile(sub, workDir);
+  if (!fs.existsSync(file)) return null;
+  if (sub.id === S.profileId) {
+    const ours = new Set(store.subscriptions.map(config.providerName).concat([LOCAL, 'default']));
+    const fromProviders = Object.values(S.providers).filter((p) => !ours.has(p.name) && ['HTTP', 'File'].includes(p.vehicleType)).reduce((a, p) => a + (p.proxies?.length || 0), 0);
+    let inline = 0; try { inline = new ProfileText(fs.readFileSync(file, 'utf8')).inlineProxyCount; } catch {}
+    return inline + fromProviders;
+  }
+  return S.providers[config.providerName(sub)]?.proxies?.length ?? null;
+}
 
 function refreshSubStatuses() {
   let changed = false;
   for (const s of store.subscriptions) {
-    if (!s.enabled || !s.url) continue;
-    const ok = subNodeCount(s) > 0;
-    if (s.statusOK !== ok) { s.statusOK = ok; s.statusMessage = ok ? '更新成功' : '更新失敗，請檢查連結'; changed = true; }
+    if (!s.enabled || s.statusOK != null) continue;
+    const ok = (subNodeCount(s) || 0) > 0;
+    s.statusOK = ok; s.statusMessage = ok ? '更新成功' : '還沒有節點'; changed = true;
   }
   if (changed) saveStore();
 }
 
-async function updateSubscription(id) {
+/** 舊版把訂閱存在 providers/，搬到 subs/；順便判斷是不是完整設定檔 */
+function migrateSubscriptions() {
+  fs.mkdirSync(path.join(workDir, 'subs'), { recursive: true });
+  for (const s of store.subscriptions) {
+    if (s.useProfile === undefined) s.useProfile = true;
+    const dst = config.subFile(s, workDir);
+    const old = path.join(workDir, 'providers', config.providerName(s) + '.yaml');
+    if (!fs.existsSync(dst) && fs.existsSync(old)) { fs.renameSync(old, dst); s.updatedAt = s.updatedAt || fs.statSync(dst).mtimeMs; }
+    try { s.isProfile = new ProfileText(fs.readFileSync(dst, 'utf8')).isFullProfile; } catch {}
+  }
+  saveStore();
+}
+
+async function downloadSub(sub) {
+  const url = String(sub.url || '').trim();
+  if (!/^https?:\/\//i.test(url)) throw new Error('連結格式不對');
+  const viaProxy = sub.viaProxy && S.coreReady && currentNode() && currentNode() !== 'DIRECT';
+  const headers = { 'User-Agent': `clash.meta mihomo/${S.coreVersion || '1.19'}` };
+  // 走代理用 Electron 的 net.fetch（已設定成 mihomo），直連用 Node 的 fetch
+  const res = viaProxy ? await net.fetch(url, { headers }) : await fetch(url, { headers, signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error('伺服器回應 HTTP ' + res.status);
+  const text = await res.text();
+  if (!text.trim()) throw new Error('內容是空的');
+  return { text, info: res.headers.get('subscription-userinfo') };
+}
+
+async function updateSubscription(id, { apply = true } = {}) {
   const sub = store.subscriptions.find((s) => s.id === id);
-  if (!sub) return;
+  if (!sub || !sub.url || S.updatingSubs.includes(id)) return;
   S.updatingSubs = [...S.updatingSubs, id]; push();
   try {
-    const name = config.providerName(sub);
-    if (!S.providers[name]) await applyConfig();
-    else {
-      try { await api(`/providers/proxies/${enc(name)}`, { method: 'PUT', timeout: 60000 }); }
-      catch (e) { sub.statusOK = false; sub.statusMessage = '更新失敗：' + e.message; saveStore(); return; }
+    const { text, info } = await downloadSub(sub);
+    const file = config.subFile(sub, workDir);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+    sub.isProfile = new ProfileText(text).isFullProfile;
+    sub.updatedAt = Date.now();
+    if (info) {
+      const kv = {};
+      for (const part of info.split(';')) { const [k, v] = part.split('=').map((x) => x.trim()); if (k && v) kv[k.toLowerCase()] = Math.round(Number(v)); }
+      Object.assign(sub, { upload: kv.upload, download: kv.download, total: kv.total, expire: kv.expire });
     }
-    await refreshProxies();
-    const ok = subNodeCount(sub) > 0;
-    sub.statusOK = ok; sub.statusMessage = ok ? '更新成功' : '更新失敗，請檢查連結';
     saveStore();
+    if (apply) await applyConfig();
+    const count = subNodeCount(sub) || 0;
+    sub.statusOK = true;
+    sub.statusMessage = sub.isProfile ? '更新成功（完整設定檔）' : (count ? `更新成功，${count} 個節點` : '更新成功');
+  } catch (e) {
+    sub.statusOK = false; sub.statusMessage = '更新失敗：' + e.message;
   } finally {
+    saveStore();
     S.updatingSubs = S.updatingSubs.filter((x) => x !== id); push();
   }
+}
+
+function autoUpdateSubscriptions() {
+  const now = Date.now();
+  for (const s of store.subscriptions) {
+    if (!s.enabled || !s.url) continue;
+    const missing = !fs.existsSync(config.subFile(s, workDir));
+    const due = s.autoUpdate && now - (s.updatedAt || 0) > Math.max(1, s.intervalHours || 6) * 3600000;
+    if (missing || due) updateSubscription(s.id);
+  }
+}
+
+function profileInfo(id) {
+  const sub = store.subscriptions.find((s) => s.id === id);
+  if (!sub) return { groups: [], rules: [] };
+  try { const p = new ProfileText(fs.readFileSync(config.subFile(sub, workDir), 'utf8')); return { groups: p.groupNames(), rules: p.rules() }; }
+  catch { return { groups: [], rules: [] }; }
+}
+
+// ---------- Wi-Fi 自動切換 ----------
+let ssidSaved = null;   // 進入指定 Wi-Fi 前的 { mode, proxy }
+async function readSSID() {
+  if (!IS_WIN) return null;
+  const { out } = await sysproxy.run('netsh', ['wlan', 'show', 'interfaces']);
+  const m = out.split(/\r?\n/).map((l) => l.match(/^\s*SSID\s*:\s*(.+)$/)).find(Boolean);
+  return m ? m[1].trim() : null;
+}
+const SSID_ACTIONS = { direct: '切到直連模式', rule: '切到規則模式', global: '切到全域模式', disconnect: '中斷系統代理' };
+async function checkSSID(force = false) {
+  if (!store.settings.ssidEnabled) return;
+  const now = await readSSID();
+  if (!force && now === S.currentSSID) return;
+  S.currentSSID = now;
+  const rule = now && (store.settings.ssidRules || []).find((r) => r.ssid === now);
+  if (rule) {
+    if (!ssidSaved) ssidSaved = { mode: store.settings.mode, proxy: S.systemProxyOn };
+    if (rule.action === 'disconnect') { if (S.systemProxyOn) await disconnect(); }
+    else if (store.settings.mode !== rule.action) await act.setMode(rule.action);
+    toast(`Wi-Fi「${now}」：${SSID_ACTIONS[rule.action]}`);
+  } else if (ssidSaved) {
+    const sv = ssidSaved; ssidSaved = null;
+    if (store.settings.mode !== sv.mode) await act.setMode(sv.mode);
+    if (sv.proxy && !S.systemProxyOn) await connect();
+    toast('已離開指定的 Wi-Fi，恢復原本設定');
+  }
+  push();
 }
 
 // ---------- 節點詳情（從訂閱檔找伺服器與連接埠） ----------
@@ -337,8 +433,17 @@ function readProviderText(file) {
   return s;
 }
 
-function nodeDetail(name, provider) {
-  const text = readProviderText(config.providerFile(provider, workDir));
+function nodeDetail(name) {
+  let file = null;
+  for (const [k, p] of Object.entries(S.providers)) {
+    if (!['HTTP', 'File'].includes(p.vehicleType) || !(p.proxies || []).some((x) => x.name === name)) continue;
+    if (k.startsWith('sub-') || k === LOCAL) file = config.providerFile(k, workDir);
+    else if (fs.existsSync(path.join(workDir, 'proxies', k + '.yaml'))) file = path.join(workDir, 'proxies', k + '.yaml');
+    break;
+  }
+  if (!file) { const prof = store.subscriptions.find((x) => x.id === S.profileId); if (prof) file = config.subFile(prof, workDir); }
+  if (!file) return null;
+  const text = readProviderText(file);
   if (!text) return null;
   if (text.includes('://') && !text.includes('proxies:')) {
     for (const line of text.split(/\r?\n/)) {
@@ -520,8 +625,8 @@ function showWindow() { if (!win) createWindow(); win.show(); win.focus(); }
 
 function updateTray() {
   if (!tray) return;
-  const g = S.proxies[PROXY_GROUP];
-  const nodeItems = (g?.all || []).slice(0, 60).map((n) => ({ label: n, type: 'radio', checked: n === g.now, click: () => act.select(n) }));
+  const g = S.proxies[S.mainGroup];
+  const nodeItems = (g?.all || []).slice(0, 60).map((n) => ({ label: n, type: 'radio', checked: n === g.now, click: () => act.select(n, S.mainGroup) }));
   const menu = Menu.buildFromTemplate([
     { label: S.coreReady ? (S.systemProxyOn ? 'Sky · 已連線' : 'Sky · 未連線') : 'Sky · 核心未執行', enabled: false },
     { type: 'separator' },
@@ -560,24 +665,32 @@ const act = {
     store.settings.mode = m; saveStore(); push();
     try { await api('/configs', { method: 'PATCH', body: { mode: m } }); await api('/connections', { method: 'DELETE' }); } catch {}
   },
-  async select(name) {
+  async select(name, group) {
+    const g = group || S.mainGroup;
     try {
-      await api(`/proxies/${enc(PROXY_GROUP)}`, { method: 'PUT', body: { name } });
+      await api(`/proxies/${enc(g)}`, { method: 'PUT', body: { name } });
       try { await api('/connections', { method: 'DELETE' }); } catch {}
       await refreshProxies();
-      toast('已切換到 ' + name.replace(/^[\u{1F1E6}-\u{1F1FF}]{2}\s*/u, ''));
+      toast(`${g} → ${name.replace(/^[\u{1F1E6}-\u{1F1FF}]{2}\s*/u, '')}`);
+      refreshEmptyRuleProviders();
     } catch (e) { toast('切換失敗：' + e.message); }
   },
-  async testAll() {
+  async testGroup(group) {
     if (S.testingDelay) return;
     S.testingDelay = true; push();
-    const list = nodes();
-    let i = 0;
-    const worker = async () => { while (i < list.length) { const n = list[i++]; await delay(n); } };
-    await Promise.all(Array.from({ length: 16 }, worker));
+    try { await api(`/group/${enc(group || S.mainGroup)}/delay`, { query: { url: store.settings.testURL, timeout: '5000' }, timeout: 30000 }); } catch {}
     await refreshProxies();
     S.testingDelay = false; toast('延遲測試完成');
   },
+  profileInfo,
+  async enableSSID(on) { store.settings.ssidEnabled = on; saveStore(); if (on) await checkSSID(true); else { S.currentSSID = null; push(); } },
+  async addSSIDRule(ssid, action) {
+    const name = String(ssid).trim(); if (!name) return;
+    store.settings.ssidRules = (store.settings.ssidRules || []).filter((r) => r.ssid !== name).concat([{ id: crypto.randomUUID(), ssid: name, action }]);
+    saveStore(); await checkSSID(true);
+  },
+  async setSSIDAction(id, action) { const r = (store.settings.ssidRules || []).find((x) => x.id === id); if (r) { r.action = action; saveStore(); await checkSSID(true); } },
+  async removeSSIDRule(id) { store.settings.ssidRules = (store.settings.ssidRules || []).filter((r) => r.id !== id); saveStore(); await checkSSID(true); },
   async testOne(name) { await delay(name); await refreshProxies(); push(); },
   toggleFavorite(name) {
     const i = store.favorites.indexOf(name);
@@ -600,16 +713,17 @@ const act = {
     const old = i >= 0 ? store.subscriptions[i] : null;
     const clean = { ...sub, url: String(sub.url || '').trim(), name: String(sub.name || '').trim() || '未命名訂閱' };
     const urlChanged = !old || old.url !== clean.url;
-    if (old) { clean.statusOK = old.statusOK; clean.statusMessage = old.statusMessage; store.subscriptions[i] = clean; }
-    else store.subscriptions.push(clean);
+    if (old) {
+      for (const k of ['statusOK', 'statusMessage', 'isProfile', 'updatedAt', 'upload', 'download', 'total', 'expire']) clean[k] = old[k];
+      store.subscriptions[i] = clean;
+    } else store.subscriptions.push(clean);
     saveStore();
-    if (urlChanged) { try { fs.unlinkSync(config.providerFile(config.providerName(clean), workDir)); } catch {} }
-    await applyConfig();
-    if (urlChanged && clean.url) await updateSubscription(clean.id);
     toast('已儲存');
+    if (urlChanged) { try { fs.unlinkSync(config.subFile(clean, workDir)); } catch {} if (clean.url) await updateSubscription(clean.id); }
+    else await applyConfig();
   },
   newSubscription() {
-    const s = { id: crypto.randomUUID(), name: `新訂閱 ${store.subscriptions.length + 1}`, url: '', enabled: true, autoUpdate: true, intervalHours: 6, viaProxy: true };
+    const s = { id: crypto.randomUUID(), name: `新訂閱 ${store.subscriptions.length + 1}`, url: '', enabled: true, autoUpdate: true, intervalHours: 6, viaProxy: true, useProfile: true };
     store.subscriptions.push(s); saveStore(); push();
     return s.id;
   },
@@ -622,11 +736,12 @@ const act = {
     const s = store.subscriptions.find((x) => x.id === id);
     if (!s) return;
     store.subscriptions = store.subscriptions.filter((x) => x.id !== id);
-    try { fs.unlinkSync(config.providerFile(config.providerName(s), workDir)); } catch {}
+    try { fs.unlinkSync(config.subFile(s, workDir)); } catch {}
     saveStore(); await applyConfig();
   },
   updateSubscription: (id) => updateSubscription(id),
   updateAll() { for (const s of store.subscriptions) if (s.enabled && s.url) updateSubscription(s.id); },
+  subNodeCounts() { return Object.fromEntries(store.subscriptions.map((s) => [s.id, subNodeCount(s)])); },
   async setRules(rules) { store.rules = rules; saveStore(); await applyConfig(); },
   async setDefaultPolicy(p) { store.settings.defaultPolicy = p; saveStore(); await applyConfig(); },
   async closeConnection(id) { try { await api(`/connections/${enc(id)}`, { method: 'DELETE' }); } catch {} },
@@ -672,8 +787,11 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
   killStale();
+  migrateSubscriptions();
   await startCore();
   loop();
+  autoUpdateSubscriptions();
+  if (store.settings.ssidEnabled) checkSSID(true).catch(() => {});
   if (store.settings.tun && IS_WIN && !S.isAdmin) toast('TUN 需要系統管理員權限，這次未啟用');
   const pointing = await sysproxy.isPointing(store.settings.mixedPort);
   if (store.settings.autoConnect || pointing || store.settings.resumeConnect) {

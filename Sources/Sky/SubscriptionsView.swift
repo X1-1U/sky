@@ -90,8 +90,12 @@ struct SubscriptionsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 14) {
                 CheckBox(isOn: binding(sub.id, \.enabled))
-                Text(sub.name).font(.system(size: 22, weight: .semibold)).lineLimit(1)
-                Tag(text: sub.enabled ? "已啟用" : "已停用", kind: sub.enabled ? .green : .gray)
+                Text(sub.name).font(.system(size: 22, weight: .semibold)).lineLimit(1).layoutPriority(1)
+                Tag(text: sub.enabled ? "已啟用" : "已停用", kind: sub.enabled ? .green : .gray).fixedSize()
+                if sub.isProfile && sub.useProfile {
+                    Tag(text: "設定檔", kind: s.profileSub?.id == sub.id ? .green : .gray, icon: "doc.text").fixedSize()
+                        .help(s.profileSub?.id == sub.id ? "正在使用這份訂閱的策略組與規則" : "完整設定檔（目前沒有使用）")
+                }
                 Spacer()
                 SkySwitch(isOn: binding(sub.id, \.enabled), label: "啟用 \(sub.name)")
                 Menu {
@@ -164,7 +168,7 @@ struct SubscriptionsView: View {
 
     private func delete(_ sub: Subscription) {
         s.store.subscriptions.removeAll { $0.id == sub.id }
-        try? FileManager.default.removeItem(at: ConfigBuilder.providerFile(sub.providerName, workDir: s.workDir))
+        try? FileManager.default.removeItem(at: ConfigBuilder.subFile(sub, workDir: s.workDir))
         if selectedID == sub.id { selectedID = nil; draft = nil; if let f = s.store.subscriptions.first { pick(f) } }
         Task { await s.applyConfig() }
     }
@@ -215,6 +219,28 @@ struct SubscriptionsView: View {
                             .frame(width: 230)
                     }
                 }
+                if let live = s.store.subscriptions.first(where: { $0.id == d.wrappedValue.id }), live.isProfile {
+                    Divider().overlay(T.line).padding(.vertical, 4)
+                    HStack(spacing: 10) {
+                        Text("使用訂閱的分組與規則").font(.system(size: 17))
+                        Image(systemName: "info.circle").foregroundColor(T.text.opacity(0.8))
+                            .help("這份訂閱是完整的 mihomo 設定檔。開啟時會沿用它的策略組、規則和規則集；關閉時只取節點。同時只會有一份訂閱當設定檔。")
+                        Spacer()
+                        SkySwitch(isOn: d.useProfile, label: "使用訂閱的分組與規則")
+                    }
+                    if d.wrappedValue.useProfile {
+                        let groups = s.profileGroups(live)
+                        HStack {
+                            Text("「代理」對應").font(.system(size: 17)).padding(.leading, 18)
+                                .help("你在「規則」頁新增、策略選「代理」的規則，會走這個策略組")
+                            Spacer()
+                            Dropdown(options: groups.map { ($0, $0) },
+                                     selection: Binding(get: { d.wrappedValue.mainGroup.flatMap { groups.contains($0) ? $0 : nil } ?? groups.first ?? "" },
+                                                        set: { d.wrappedValue.mainGroup = $0 }))
+                                .frame(width: 230)
+                        }
+                    }
+                }
                 Divider().overlay(T.line).padding(.vertical, 4)
                 HStack(spacing: 10) {
                     Text("透過目前代理更新").font(.system(size: 17))
@@ -263,19 +289,20 @@ struct SubscriptionsView: View {
         guard var d = draft, let i = s.store.subscriptions.firstIndex(where: { $0.id == d.id }) else { return }
         d.url = d.url.trimmingCharacters(in: .whitespacesAndNewlines)
         d.name = d.name.trimmingCharacters(in: .whitespaces).ifEmpty("未命名訂閱")
-        let urlChanged = s.store.subscriptions[i].url != d.url
-        d.statusOK = s.store.subscriptions[i].statusOK
-        d.statusMessage = s.store.subscriptions[i].statusMessage
+        let old = s.store.subscriptions[i]
+        let urlChanged = old.url != d.url
+        // 下載得到的資訊以目前存的為準
+        d.statusOK = old.statusOK; d.statusMessage = old.statusMessage
+        d.isProfile = old.isProfile; d.updatedAt = old.updatedAt
+        d.upload = old.upload; d.download = old.download; d.total = old.total; d.expire = old.expire
         s.store.subscriptions[i] = d
         draft = d
         if urlChanged {
-            try? FileManager.default.removeItem(at: ConfigBuilder.providerFile(d.providerName, workDir: s.workDir))
+            try? FileManager.default.removeItem(at: ConfigBuilder.subFile(d, workDir: s.workDir))
+            s.updateSubscription(d.id)
+        } else {
+            Task { await s.applyConfig() }
         }
-        let id = d.id
-        Task {
-            await s.applyConfig()
-            if urlChanged { s.updateSubscription(id) }
-            s.showToast("已儲存")
-        }
+        s.showToast("已儲存")
     }
 }

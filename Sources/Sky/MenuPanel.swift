@@ -29,9 +29,9 @@ struct MenuPanel: View {
                     Text(Fmt.delay(s.currentDelay)).font(.system(size: 12, weight: .semibold)).foregroundColor(T.accent)
                 }
                 Menu {
-                    if let g = s.proxies[ConfigBuilder.proxyGroup] {
+                    if let g = s.proxies[s.mainGroup] {
                         ForEach(g.all ?? [], id: \.self) { n in
-                            Button { s.select(n) } label: {
+                            Button { s.select(n, in: s.mainGroup) } label: {
                                 if n == g.now { Label(n, systemImage: "checkmark") } else { Text(n) }
                             }
                         }
@@ -40,8 +40,8 @@ struct MenuPanel: View {
                     HStack(spacing: 8) {
                         FlagView(name: s.currentNode ?? "", size: 16)
                         Text(Flags.cleanName(s.currentNode ?? "未選擇")).font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                        if s.currentGroupNow == ConfigBuilder.autoGroup {
-                            Text("自動").font(.system(size: 11)).foregroundColor(T.accent)
+                        if let now = s.currentGroupNow, s.isGroup(now) {
+                            Text(now).font(.system(size: 11)).foregroundColor(T.accent).lineLimit(1)
                         }
                         Spacer()
                         Image(systemName: "chevron.up.chevron.down").font(.system(size: 11)).foregroundColor(T.mute)

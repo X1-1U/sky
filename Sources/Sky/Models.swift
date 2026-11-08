@@ -12,6 +12,16 @@ struct Subscription: Codable, Identifiable, Equatable {
     var viaProxy = true
     var statusOK: Bool?
     var statusMessage: String?
+    /// 使用訂閱裡的策略組與規則（完整設定檔才有效）
+    var useProfile = true
+    /// 「代理」策略要對應到訂閱的哪個策略組（nil = 第一個）
+    var mainGroup: String?
+    var isProfile = false
+    var upload: Int64?
+    var download: Int64?
+    var total: Int64?
+    var expire: Int64?
+    var updatedAt: Double?
 
     var providerName: String { "sub-" + id.uuidString.lowercased() }
 
@@ -28,6 +38,14 @@ struct Subscription: Codable, Identifiable, Equatable {
         viaProxy = try c.decodeIfPresent(Bool.self, forKey: .viaProxy) ?? true
         statusOK = try c.decodeIfPresent(Bool.self, forKey: .statusOK)
         statusMessage = try c.decodeIfPresent(String.self, forKey: .statusMessage)
+        useProfile = try c.decodeIfPresent(Bool.self, forKey: .useProfile) ?? true
+        mainGroup = try c.decodeIfPresent(String.self, forKey: .mainGroup)
+        isProfile = try c.decodeIfPresent(Bool.self, forKey: .isProfile) ?? false
+        upload = try c.decodeIfPresent(Int64.self, forKey: .upload)
+        download = try c.decodeIfPresent(Int64.self, forKey: .download)
+        total = try c.decodeIfPresent(Int64.self, forKey: .total)
+        expire = try c.decodeIfPresent(Int64.self, forKey: .expire)
+        updatedAt = try c.decodeIfPresent(Double.self, forKey: .updatedAt)
     }
 }
 
@@ -78,6 +96,8 @@ struct AppSettings: Codable, Equatable {
     var tun = false
     var autoCheckUpdates = true
     var lastUpdateCheck: Double = 0
+    var ssidEnabled = false
+    var ssidRules: [SSIDRule] = []
 
     init() {}
     init(from d: Decoder) throws {
@@ -95,7 +115,18 @@ struct AppSettings: Codable, Equatable {
         tun = try c.decodeIfPresent(Bool.self, forKey: .tun) ?? false
         autoCheckUpdates = try c.decodeIfPresent(Bool.self, forKey: .autoCheckUpdates) ?? true
         lastUpdateCheck = try c.decodeIfPresent(Double.self, forKey: .lastUpdateCheck) ?? 0
+        ssidEnabled = try c.decodeIfPresent(Bool.self, forKey: .ssidEnabled) ?? false
+        ssidRules = try c.decodeIfPresent([SSIDRule].self, forKey: .ssidRules) ?? []
     }
+}
+
+/// 連到某個 Wi-Fi 時要做什麼
+struct SSIDRule: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var ssid: String
+    var action: String = "direct"     // direct / rule / global / disconnect
+
+    static let actions: [(String, String)] = [("direct", "切到直連模式"), ("rule", "切到規則模式"), ("global", "切到全域模式"), ("disconnect", "中斷系統代理")]
 }
 
 struct Store: Codable {

@@ -62,7 +62,12 @@ final class AppState: ObservableObject {
     @Published var coreUpdate: CoreUpdate?
     @Published var checkingUpdates = false
     @Published var coreUpdating = false
+    /// 「代理」對應的策略組（設定檔模式時是訂閱的第一個策略組）
+    @Published var mainGroup = ConfigBuilder.proxyGroup
+    @Published var currentSSID: String?
 
+    /// 進入指定 Wi-Fi 前的模式與連線狀態，離開時恢復
+    var ssidSaved: (mode: String, proxy: Bool)?
     private var lastTotals: (Date, Int64, Int64)?
     private var lastConnBytes: [String: (Int64, Int64)] = [:]
     private var loop: Task<Void, Never>?
@@ -106,9 +111,12 @@ final class AppState: ObservableObject {
 
     func bootstrap() async {
         copyGeoData()
+        migrateSubscriptions()
         core.killStale()
         await startCore()
         startLoop()
+        autoUpdateSubscriptions()
+        if store.settings.ssidEnabled { enableSSID(true) }
         let port = store.settings.mixedPort
         let pointing = await Task.detached { SystemProxy.isPointing(to: port) }.value
         if store.settings.autoConnect || pointing {
@@ -135,7 +143,9 @@ final class AppState: ObservableObject {
     var wantTun: Bool { store.settings.tun && core.isTunAuthorized }
 
     private func writeConfig() -> (Bool, String) {
-        let yaml = ConfigBuilder.build(store, workDir: workDir, tun: wantTun)
+        let built = ConfigBuilder.build(store, workDir: workDir, tun: wantTun)
+        mainGroup = built.mainGroup
+        let yaml = built.yaml
         do { try yaml.write(to: core.configURL, atomically: true, encoding: .utf8) } catch {
             return (false, "寫入設定檔失敗：\(error.localizedDescription)")
         }
@@ -158,7 +168,7 @@ final class AppState: ObservableObject {
             return
         }
         tunActive = wantTun
-        try? await api.select(group: "GLOBAL", name: ConfigBuilder.proxyGroup)
+        try? await api.select(group: "GLOBAL", name: mainGroup)
         lastTotals = nil
         await refreshProxies()
         refreshSubStatuses()
@@ -188,7 +198,7 @@ final class AppState: ObservableObject {
         } catch {
             coreError = "重新載入失敗：\(error.localizedDescription)"
         }
-        try? await api.select(group: "GLOBAL", name: ConfigBuilder.proxyGroup)
+        try? await api.select(group: "GLOBAL", name: mainGroup)
         await refreshProxies()
         refreshSubStatuses()
     }
@@ -237,6 +247,9 @@ final class AppState: ObservableObject {
                 await self.tick()
                 if n % 5 == 0 { await self.refreshProxies() }
                 if n % 60 == 30 { await self.testCurrentNode() }
+                if n % 60 == 45 { self.autoUpdateSubscriptions() }
+                if n % 300 == 20 { await self.refreshEmptyRuleProviders() }
+                if n % 5 == 2 { await self.checkSSID() }
                 n += 1
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
@@ -284,71 +297,111 @@ final class AppState: ObservableObject {
     func refreshProxies() async {
         guard coreReady else { return }
         if let p = try? await api.proxies() { proxies = p }
-        if let p = try? await api.providers() { providers = p }
+        if let p = try? await api.providers() {
+            providers = p
+            var map: [String: String] = [:]
+            for (k, v) in p where v.isUserProvider { for x in v.proxies ?? [] { map[x.name] = k } }
+            nodeProvider = map
+        }
     }
 
-    // MARK: - 節點
+    // MARK: - 節點與策略組
 
-    var currentGroupNow: String? { proxies[ConfigBuilder.proxyGroup]?.now }
+    static let groupTypes: Set<String> = ["Selector", "URLTest", "Fallback", "LoadBalance", "Relay"]
 
-    /// 實際在用的節點（自動選擇時取它選中的那個）
-    var currentNode: String? {
-        guard var n = currentGroupNow else { return nil }
+    func isGroup(_ name: String) -> Bool { proxies[name].map { AppState.groupTypes.contains($0.type) } ?? false }
+
+    var currentGroupNow: String? { proxies[mainGroup]?.now }
+
+    /// 實際在用的節點（一路往下找到不是策略組的那個）
+    var currentNode: String? { resolve(mainGroup) }
+
+    func resolve(_ group: String) -> String? {
+        guard var n = proxies[group]?.now else { return nil }
         var guardCount = 0
-        while let p = proxies[n], let next = p.now, guardCount < 5 { n = next; guardCount += 1 }
+        while let p = proxies[n], let next = p.now, guardCount < 8 { n = next; guardCount += 1 }
         return n
     }
 
     var currentDelay: Int? { currentNode.flatMap { proxies[$0]?.lastDelay } }
 
-    var nodes: [NodeItem] {
-        var out: [NodeItem] = []
-        var seen = Set<String>()
-        let order = store.subscriptions.map(\.providerName) + [ConfigBuilder.localProvider]
-        for key in order {
-            guard let prov = providers[key], prov.isUserProvider else { continue }
-            for p in prov.proxies ?? [] where !seen.contains(p.name) {
-                seen.insert(p.name)
-                let live = proxies[p.name]
-                let h = live?.history ?? p.history ?? []
-                out.append(NodeItem(name: p.name, type: p.type, provider: key, delay: h.last?.delay, history: h))
-            }
+    /// 可以在節點頁選擇的策略組（依設定檔順序，主要策略組排第一）
+    var groups: [String] {
+        var list = (proxies["GLOBAL"]?.all ?? []).filter { isGroup($0) }
+        if list.isEmpty, proxies[mainGroup] != nil { list = [mainGroup] }
+        if let i = list.firstIndex(of: mainGroup) { list.remove(at: i); list.insert(mainGroup, at: 0) }
+        return list
+    }
+
+    /// 節點屬於哪個來源（找伺服器資訊用）
+    private(set) var nodeProvider: [String: String] = [:]
+
+    func members(of group: String) -> [NodeItem] {
+        (proxies[group]?.all ?? []).map { n in
+            let h = proxies[n]?.history ?? []
+            return NodeItem(name: n, type: proxies[n]?.type ?? "—", provider: nodeProvider[n] ?? "", delay: h.last?.delay, history: h)
         }
-        return out
+    }
+
+    /// 節點詳情用的檔案（訂閱設定檔或節點來源檔）
+    func detailFile(for node: NodeItem) -> URL? {
+        if node.provider.hasPrefix("sub-") || node.provider == ConfigBuilder.localProvider {
+            return ConfigBuilder.providerFile(node.provider, workDir: workDir)
+        }
+        if let prof = ConfigBuilder.profileSub(store, workDir: workDir) {
+            if !node.provider.isEmpty {
+                // 訂閱自己內嵌的節點來源，mihomo 會存在設定檔指定的 path
+                let guess = workDir.appendingPathComponent("proxies/\(node.provider).yaml")
+                if FileManager.default.fileExists(atPath: guess.path) { return guess }
+            }
+            return ConfigBuilder.subFile(prof, workDir: workDir)
+        }
+        return nil
     }
 
     func providerDisplayName(_ key: String) -> String {
         if key == ConfigBuilder.localProvider { return "本機節點" }
-        return store.subscriptions.first { $0.providerName == key }?.name ?? key
+        if let s = store.subscriptions.first(where: { $0.providerName == key }) { return s.name }
+        if let prof = ConfigBuilder.profileSub(store, workDir: workDir) {
+            return key.isEmpty ? prof.name : "\(prof.name) · \(key)"
+        }
+        return key.isEmpty ? "—" : key
     }
 
-    func select(_ node: String) {
+    func select(_ node: String, in group: String? = nil) {
+        let g = group ?? mainGroup
         Task {
             do {
-                try await api.select(group: ConfigBuilder.proxyGroup, name: node)
+                try await api.select(group: g, name: node)
                 try? await api.closeAll()
                 await refreshProxies()
-                showToast("已切換到 \(Flags.cleanName(node))")
+                showToast("\(g) → \(Flags.cleanName(node))")
+                await refreshEmptyRuleProviders()
             } catch {
                 showToast("切換失敗：\(error.localizedDescription)")
             }
         }
     }
 
-    func testAllDelays() {
+    /// 規則集第一次下載失敗（例如當時還沒選節點）時，mihomo 要等更新間隔才會重試；這裡主動補抓空的
+    func refreshEmptyRuleProviders() async {
+        guard coreReady,
+              let d = try? await api.request("/providers/rules"),
+              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let provs = obj["providers"] as? [String: [String: Any]] else { return }
+        let empty = provs.filter { ($0.value["ruleCount"] as? Int ?? 0) == 0 }.map(\.key)
+        await withTaskGroup(of: Void.self) { g in
+            for name in empty {
+                g.addTask { _ = try? await self.api.request("/providers/rules/\(MihomoAPI.enc(name))", method: "PUT", timeout: 30) }
+            }
+        }
+    }
+
+    func testGroup(_ group: String) {
         guard !testingDelay else { return }
         testingDelay = true
         Task {
-            let url = store.settings.testURL
-            let names = nodes.map(\.name)
-            await withTaskGroup(of: Void.self) { g in
-                var i = 0
-                for n in names {
-                    if i >= 16 { await g.next() }   // 同時最多 16 個
-                    g.addTask { _ = await self.api.delay(n, url: url) }
-                    i += 1
-                }
-            }
+            _ = try? await api.groupDelay(group, url: store.settings.testURL)
             await refreshProxies()
             testingDelay = false
             showToast("延遲測試完成")
@@ -378,51 +431,129 @@ final class AppState: ObservableObject {
         Task { await applyConfig(); showToast("已新增 \(lines.count) 個節點") }
     }
 
-    // MARK: - 訂閱
+    // MARK: - 訂閱（由 Sky 自己下載，才能拿到完整設定檔與流量資訊）
 
-    func subNodeCount(_ s: Subscription) -> Int? { providers[s.providerName]?.proxies?.count }
-    func subUpdatedAt(_ s: Subscription) -> Date? { providers[s.providerName]?.updatedAt.flatMap(Fmt.parseDate) }
+    var profileSub: Subscription? { ConfigBuilder.profileSub(store, workDir: workDir) }
+
+    func subNodeCount(_ s: Subscription) -> Int? {
+        guard FileManager.default.fileExists(atPath: ConfigBuilder.subFile(s, workDir: workDir).path) else { return nil }
+        if s.id == profileSub?.id {
+            // 設定檔：內嵌節點＋它自己的節點來源
+            let ours = Set(store.subscriptions.map(\.providerName) + [ConfigBuilder.localProvider, "default"])
+            let fromProviders = providers.values.filter { !ours.contains($0.name) && $0.isUserProvider }.reduce(0) { $0 + ($1.proxies?.count ?? 0) }
+            let inline = (try? String(contentsOf: ConfigBuilder.subFile(s, workDir: workDir), encoding: .utf8)).map { ProfileText($0).inlineProxyCount } ?? 0
+            return inline + fromProviders
+        }
+        return providers[s.providerName]?.proxies?.count
+    }
+
+    func subUpdatedAt(_ s: Subscription) -> Date? { s.updatedAt.map { Date(timeIntervalSince1970: $0) } }
+
     func subInfo(_ s: Subscription) -> SubInfo? {
-        guard let i = providers[s.providerName]?.subscriptionInfo, (i.Total ?? 0) > 0 else { return nil }
-        return i
+        guard let t = s.total, t > 0 else { return nil }
+        return SubInfo(Upload: s.upload, Download: s.download, Total: t, Expire: s.expire)
+    }
+
+    /// 訂閱設定檔的策略組名稱
+    func profileGroups(_ s: Subscription) -> [String] {
+        guard let t = try? String(contentsOf: ConfigBuilder.subFile(s, workDir: workDir), encoding: .utf8) else { return [] }
+        return ProfileText(t).groupNames()
+    }
+
+    func profileRules(_ s: Subscription) -> [String] {
+        guard let t = try? String(contentsOf: ConfigBuilder.subFile(s, workDir: workDir), encoding: .utf8) else { return [] }
+        return ProfileText(t).rules()
     }
 
     private func refreshSubStatuses() {
-        for i in store.subscriptions.indices where store.subscriptions[i].enabled {
+        for i in store.subscriptions.indices where store.subscriptions[i].enabled && store.subscriptions[i].statusOK == nil {
+            let ok = (subNodeCount(store.subscriptions[i]) ?? 0) > 0
+            store.subscriptions[i].statusOK = ok
+            store.subscriptions[i].statusMessage = ok ? "更新成功" : "還沒有節點"
+        }
+    }
+
+    /// 舊版把訂閱存在 providers/，搬到 subs/
+    func migrateSubscriptions() {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: workDir.appendingPathComponent("subs"), withIntermediateDirectories: true)
+        for i in store.subscriptions.indices {
             let s = store.subscriptions[i]
-            guard !s.url.isEmpty else { continue }
-            let count = subNodeCount(s) ?? 0
-            let ok = count > 0
-            if store.subscriptions[i].statusOK != ok {
-                store.subscriptions[i].statusOK = ok
-                store.subscriptions[i].statusMessage = ok ? "更新成功" : "更新失敗，請檢查連結"
+            let dst = ConfigBuilder.subFile(s, workDir: workDir)
+            let old = workDir.appendingPathComponent("providers/\(s.providerName).yaml")
+            if !fm.fileExists(atPath: dst.path), fm.fileExists(atPath: old.path) {
+                try? fm.moveItem(at: old, to: dst)
+                if store.subscriptions[i].updatedAt == nil {
+                    store.subscriptions[i].updatedAt = ((try? dst.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()).timeIntervalSince1970
+                }
+            }
+            if let t = try? String(contentsOf: dst, encoding: .utf8) {
+                let full = ProfileText(t).isFullProfile
+                if store.subscriptions[i].isProfile != full { store.subscriptions[i].isProfile = full }
             }
         }
     }
 
-    func updateSubscription(_ id: UUID) {
-        guard let s = store.subscriptions.first(where: { $0.id == id }) else { return }
+    /// 下載一個訂閱：存檔、解析流量資訊、判斷是不是完整設定檔
+    private func download(_ s: Subscription) async throws -> (Data, HTTPURLResponse) {
+        guard let url = URL(string: s.url.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw APIError(status: 0, body: "連結格式不對") }
+        let proxyPort = (s.viaProxy && coreReady && currentNode != nil && currentNode != "DIRECT") ? store.settings.mixedPort : nil
+        var r = URLRequest(url: url, timeoutInterval: 30)
+        r.setValue("clash.meta mihomo/\(coreVersion.isEmpty ? "1.19" : coreVersion)", forHTTPHeaderField: "User-Agent")
+        let (d, resp) = try await Updater.session(proxyPort: proxyPort).data(for: r)
+        guard let h = resp as? HTTPURLResponse else { throw APIError(status: 0, body: "沒有回應") }
+        guard h.statusCode == 200 else { throw APIError(status: h.statusCode, body: "伺服器拒絕") }
+        guard !d.isEmpty else { throw APIError(status: 200, body: "內容是空的") }
+        return (d, h)
+    }
+
+    func updateSubscription(_ id: UUID, apply: Bool = true) {
+        guard let s = store.subscriptions.first(where: { $0.id == id }), !s.url.isEmpty else { return }
         updatingSubs.insert(id)
         Task {
             defer { updatingSubs.remove(id) }
-            if providers[s.providerName] == nil {
-                await applyConfig()      // 新訂閱還沒寫進設定檔
-            } else {
-                do {
-                    try await api.updateProvider(s.providerName)
-                } catch {
-                    setStatus(id, ok: false, msg: "更新失敗：\(error.localizedDescription)")
-                    return
+            do {
+                let (data, resp) = try await download(s)
+                let file = ConfigBuilder.subFile(s, workDir: workDir)
+                try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: file, options: .atomic)
+                guard let i = store.subscriptions.firstIndex(where: { $0.id == id }) else { return }
+                let text = String(data: data, encoding: .utf8) ?? ""
+                store.subscriptions[i].isProfile = ProfileText(text).isFullProfile
+                store.subscriptions[i].updatedAt = Date().timeIntervalSince1970
+                if let info = resp.value(forHTTPHeaderField: "subscription-userinfo") {
+                    var kv: [String: Int64] = [:]
+                    for part in info.split(separator: ";") {
+                        let p = part.split(separator: "=").map { $0.trimmingCharacters(in: .whitespaces) }
+                        if p.count == 2, let v = Int64(p[1]) ?? Double(p[1]).map({ Int64($0) }) { kv[p[0].lowercased()] = v }
+                    }
+                    store.subscriptions[i].upload = kv["upload"]
+                    store.subscriptions[i].download = kv["download"]
+                    store.subscriptions[i].total = kv["total"]
+                    store.subscriptions[i].expire = kv["expire"]
                 }
+                if apply { await applyConfig() }
+                let count = subNodeCount(store.subscriptions[i]) ?? 0
+                let isProf = store.subscriptions[i].isProfile
+                setStatus(id, ok: true, msg: isProf ? "更新成功（完整設定檔）" : (count > 0 ? "更新成功，\(count) 個節點" : "更新成功"))
+            } catch {
+                setStatus(id, ok: false, msg: "更新失敗：\(error.localizedDescription)")
             }
-            await refreshProxies()
-            let ok = (subNodeCount(s) ?? 0) > 0
-            setStatus(id, ok: ok, msg: ok ? "更新成功" : "更新失敗，請檢查連結")
         }
     }
 
     func updateAllSubscriptions() {
         for s in store.subscriptions where s.enabled && !s.url.isEmpty { updateSubscription(s.id) }
+    }
+
+    /// 依各訂閱的更新間隔自動更新；沒有檔案的立刻下載
+    func autoUpdateSubscriptions() {
+        let now = Date().timeIntervalSince1970
+        for s in store.subscriptions where s.enabled && !s.url.isEmpty && !updatingSubs.contains(s.id) {
+            let missing = !FileManager.default.fileExists(atPath: ConfigBuilder.subFile(s, workDir: workDir).path)
+            let due = s.autoUpdate && now - (s.updatedAt ?? 0) > Double(max(1, s.intervalHours) * 3600)
+            if missing || due { updateSubscription(s.id) }
+        }
     }
 
     private func setStatus(_ id: UUID, ok: Bool, msg: String) {

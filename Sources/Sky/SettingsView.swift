@@ -6,6 +6,8 @@ struct SettingsView: View {
     @State private var controllerPort = ""
     @State private var testURL = ""
     @State private var showLog = false
+    @State private var newSSID = ""
+    @State private var newSSIDAction = "direct"
 
     var body: some View {
         ScrollView {
@@ -57,6 +59,53 @@ struct SettingsView: View {
                             HStack {
                                 Spacer()
                                 Button("套用") { applyNetwork() }.buttonStyle(PrimaryButton())
+                            }
+                        }
+
+                        section("Wi-Fi 自動切換（SSID）") {
+                            toggleRow("依 Wi-Fi 自動切換", Binding(get: { s.store.settings.ssidEnabled }, set: { s.enableSSID($0) }),
+                                      hint: "連到指定的 Wi-Fi 時自動切換模式或中斷代理，離開後恢復原本的設定")
+                            if s.store.settings.ssidEnabled {
+                                Divider().overlay(T.line)
+                                HStack {
+                                    Text("目前 Wi-Fi").font(.system(size: 15)).foregroundColor(T.mute)
+                                    Spacer()
+                                    if let id = s.currentSSID {
+                                        Text(id).font(.system(size: 15, weight: .medium))
+                                    } else if LocationAuth.shared.denied || !LocationAuth.shared.authorized {
+                                        Button("需要定位權限，前往設定") {
+                                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices")!)
+                                        }
+                                        .buttonStyle(GhostButton(compact: true))
+                                    } else {
+                                        Text("未連線 Wi-Fi").font(.system(size: 15)).foregroundColor(T.mute)
+                                    }
+                                }
+                                ForEach(s.store.settings.ssidRules) { r in
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "wifi").foregroundColor(r.ssid == s.currentSSID ? T.accent : T.mute)
+                                        Text(r.ssid).font(.system(size: 16)).lineLimit(1)
+                                        Spacer()
+                                        Dropdown(options: SSIDRule.actions,
+                                                 selection: Binding(get: { r.action }, set: { v in
+                                                     if let i = s.store.settings.ssidRules.firstIndex(where: { $0.id == r.id }) { s.store.settings.ssidRules[i].action = v }
+                                                     Task { await s.checkSSID(force: true) }
+                                                 }))
+                                            .frame(width: 180)
+                                        Button { s.removeSSIDRule(r.id) } label: { Image(systemName: "trash").foregroundColor(T.red) }
+                                            .buttonStyle(.plain).accessibilityLabel("刪除 \(r.ssid)")
+                                    }
+                                }
+                                HStack(spacing: 10) {
+                                    TextField("Wi-Fi 名稱", text: $newSSID).skyField()
+                                    Dropdown(options: SSIDRule.actions, selection: $newSSIDAction).frame(width: 180)
+                                    Button("加入") { s.addSSIDRule(newSSID, action: newSSIDAction); newSSID = "" }
+                                        .buttonStyle(PrimaryButton())
+                                        .disabled(newSSID.trimmingCharacters(in: .whitespaces).isEmpty)
+                                }
+                                if let id = s.currentSSID, !s.store.settings.ssidRules.contains(where: { $0.ssid == id }) {
+                                    Button("加入目前的 Wi-Fi「\(id)」") { newSSID = id }.buttonStyle(GhostButton(compact: true))
+                                }
                             }
                         }
                     }

@@ -168,8 +168,18 @@ function Modal({ title, children, onClose, width }) {
 }
 
 // ---------- 共用推導 ----------
+const GROUP_TYPES = ['Selector', 'URLTest', 'Fallback', 'LoadBalance', 'Relay'];
+const isGroup = (s, n) => GROUP_TYPES.includes(s.proxies[n]?.type);
+function groupList(s) {
+  let list = (s.proxies.GLOBAL?.all || []).filter((n) => isGroup(s, n));
+  if (!list.length && s.proxies[s.mainGroup]) list = [s.mainGroup];
+  return [s.mainGroup, ...list.filter((g) => g !== s.mainGroup)].filter((g) => s.proxies[g]);
+}
+function members(s, g) {
+  return (s.proxies[g]?.all || []).map((n) => { const h = s.proxies[n]?.history || []; return { name: n, type: s.proxies[n]?.type || '—', history: h, delay: h.length ? h[h.length - 1].delay : null }; });
+}
 function currentNode(s) {
-  let n = s.proxies[PROXY_GROUP]?.now;
+  let n = s.proxies[s.mainGroup]?.now;
   for (let i = 0; i < 5 && n && s.proxies[n]?.now; i++) n = s.proxies[n].now;
   return n;
 }
@@ -234,22 +244,26 @@ function Overview({ s, go }) {
 function Nodes({ s, go }) {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
-  const [provider, setProvider] = useState('*');
+  const [groupSel, setGroupSel] = useState(null);
   const [sel, setSel] = useState(null);
   const [sortDelay, setSortDelay] = useState(false);
   const [modal, setModal] = useState(null);
   const [detail, setDetail] = useState(null);
-  const all = nodeList(s);
-  const cur = currentNode(s);
-  let list = all.filter((n) => (provider === '*' || n.provider === provider)
-    && (filter !== 'fav' || s.store.favorites.includes(n.name))
+  const groups = groupList(s);
+  const group = groupSel && groups.includes(groupSel) ? groupSel : s.mainGroup;
+  const canSelect = s.proxies[group]?.type === 'Selector';
+  const all = members(s, group);
+  const cur = s.proxies[group]?.now;
+  let list = all.filter((n) => (filter !== 'fav' || s.store.favorites.includes(n.name))
     && (filter !== 'low' || (n.delay > 0 && n.delay < 150))
     && (!search || n.name.toLowerCase().includes(search.toLowerCase()) || n.type.toLowerCase().includes(search.toLowerCase())));
   if (sortDelay) list = [...list].sort((a, b) => (a.delay || 1e9) - (b.delay || 1e9));
   const shown = all.find((n) => n.name === (sel || cur)) || list[0];
-  useEffect(() => { if (shown) act('nodeDetail', shown.name, shown.provider).then(setDetail); else setDetail(null); }, [shown?.name, shown?.provider]);
-  const provOpts = [['*', '全部訂閱'], ...s.store.subscriptions.filter((x) => x.enabled).map((x) => ['sub-' + String(x.id).toLowerCase(), x.name]), ...(s.store.localLinks.length ? [[LOCAL, '本機節點']] : [])];
-  const status = (n) => n.name === cur ? ['使用中', 'solid'] : n.delay == null ? ['未測試', 'gray'] : n.delay === 0 ? ['逾時', 'red'] : ['可用', ''];
+  useEffect(() => { if (shown && !isGroup(s, shown.name)) act('nodeDetail', shown.name).then(setDetail); else setDetail(null); }, [shown?.name]);
+  const groupOpts = groups.map((g) => [g, (g === s.mainGroup ? '★ ' : '') + g + (s.proxies[g]?.now ? ' · ' + cleanName(s.proxies[g].now) : '')]);
+  const status = (n) => n.name === cur ? ['使用中', 'solid'] : isGroup(s, n.name) ? ['策略組', 'gray'] : ['DIRECT', 'REJECT'].includes(n.name) ? ['內建', 'gray'] : n.delay == null ? ['未測試', 'gray'] : n.delay === 0 ? ['逾時', 'red'] : ['可用', ''];
+  const prof = s.store.subscriptions.find((x) => x.id === s.profileId);
+  const pick = (name) => canSelect && act('select', name, group);
 
   const openEditor = (n) => {
     const idx = s.store.localLinks.findIndex((l) => { const h = l.lastIndexOf('#'); if (h >= 0) { try { return decodeURIComponent(l.slice(h + 1)) === n.name; } catch { return l.slice(h + 1) === n.name; } } return false; });
@@ -258,15 +272,15 @@ function Nodes({ s, go }) {
 
   return html`<div class="page">
     <div class="head"><div><div class="row" style="gap:18px"><h1 class="title">節點</h1><${Pill} on=${s.systemProxyOn} text=${s.systemProxyOn ? '已連線' : '未連線'} /></div>
-      <div class="subtitle" style="margin-top:6px">選擇連線節點</div></div>
+      <div class="subtitle" style="margin-top:6px">${prof ? `使用訂閱「${prof.name}」的策略組` : '選擇連線節點'}</div></div>
       <span class="spacer"></span>
-      <button class="btn" disabled=${s.testingDelay || !s.coreReady} onClick=${() => act('testAll')}>${I('gauge')}${s.testingDelay ? '測試中…' : '測試延遲'}</button>
+      <button class="btn" disabled=${s.testingDelay || !s.coreReady} onClick=${() => act('testGroup', group)}>${I('gauge')}${s.testingDelay ? '測試中…' : '測試延遲'}</button>
       <button class="btn primary" onClick=${() => setModal({ kind: 'add', text: '' })}>${I('plus')}新增節點</button></div>
     <div class="row">
       <${Search} value=${search} onInput=${setSearch} placeholder="搜尋節點" style="flex:0 1 340px" />
       ${[['all', '全部'], ['fav', '收藏'], ['low', '低延遲']].map(([v, l]) => html`<button class=${'chip' + (filter === v ? ' on' : '')} onClick=${() => setFilter(v)}>${l}</button>`)}
       <span class="grow"></span><span class="sep"></span>
-      <${Select} options=${provOpts} value=${provider} onChange=${setProvider} style="flex:0 1 380px;min-width:160px" />
+      <${Select} options=${groupOpts} value=${group} onChange=${(g) => { setGroupSel(g); setSel(null); }} style="flex:0 1 380px;min-width:180px" />
     </div>
     <div class="split">
       <div class="card table" style="padding:0 6px">
@@ -275,14 +289,14 @@ function Nodes({ s, go }) {
         ${all.length === 0 ? html`<div class="empty">${I('cloud')}<div>${s.coreReady ? '還沒有節點，先到「訂閱」新增訂閱連結，或按「新增節點」貼上分享連結' : '核心尚未啟動'}</div>
             ${s.coreReady && html`<button class="btn sm" onClick=${() => go('subscriptions')}>前往訂閱</button>`}</div>` :
           html`<div class="tbody">${list.map((n) => { const st = status(n); const fav = s.store.favorites.includes(n.name); const on = n.name === shown?.name; return html`
-            <div class=${'tr click' + (on ? ' sel' : '')} style="min-height:62px;padding:0 6px" key=${n.name} onClick=${() => setSel(n.name)} onDblClick=${() => act('select', n.name)}>
+            <div class=${'tr click' + (on ? ' sel' : '')} style="min-height:62px;padding:0 6px" key=${n.name} onClick=${() => setSel(n.name)} onDblClick=${() => pick(n.name)}>
               <button class="icon-btn" style=${{ color: fav ? 'var(--accent)' : 'var(--text)', width: '46px' }} aria-label="收藏" onClick=${(e) => { e.stopPropagation(); act('toggleFavorite', n.name); }}>${html`<svg viewBox="0 0 24 24" fill=${fav ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d=${P.star} /></svg>`}</button>
               <span style="width:44px;display:flex;justify-content:center"><${Flag} name=${n.name} /></span>
               <span class="c f" style="font-size:17px">${cleanName(n.name)}</span>
               <span class="c" style="width:130px">${n.type}</span>
               <span class="c num" style="width:90px">${fmtDelay(n.delay)}</span>
               <span class="c" style="width:100px"><${Tag} text=${st[0]} kind=${st[1]} /></span>
-              <button class="icon-btn" aria-label="使用此節點" title="使用此節點" onClick=${(e) => { e.stopPropagation(); act('select', n.name); }}>${I('more')}</button>
+              ${canSelect ? html`<button class="icon-btn" aria-label="使用此節點" title="使用此節點" onClick=${(e) => { e.stopPropagation(); pick(n.name); }}>${I('check')}</button>` : html`<span style="width:40px"></span>`}
             </div>`; })}</div>`}
         <div class="hr"></div>
         <div class="row" style="height:50px;padding:0 18px;font-size:15px">共 ${all.length} 個節點 · ${list.length} 個已顯示</div>
@@ -292,7 +306,7 @@ function Nodes({ s, go }) {
         return html`
         <div class="row" style="align-items:flex-start"><${Flag} name=${shown.name} />
           <div class="grow"><div style="font-size:24px;font-weight:500;line-height:1.3">${cleanName(shown.name)}</div>
-            <div style="margin-top:8px">${shown.name === cur ? html`<${Tag} text="使用中" />` : html`<button class="btn sm" onClick=${() => act('select', shown.name)}>使用此節點</button>`}</div></div>
+            <div style="margin-top:8px">${shown.name === cur ? html`<${Tag} text="使用中" />` : canSelect ? html`<button class="btn sm" onClick=${() => pick(shown.name)}>使用此節點</button>` : html`<${Tag} text="此策略組自動選擇" kind="gray" />`}</div></div>
           <button class="icon-btn" style="color:var(--accent)" aria-label="收藏" onClick=${() => act('toggleFavorite', shown.name)}>${html`<svg viewBox="0 0 24 24" fill=${fav ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d=${P.star} /></svg>`}</button></div>
         <div style="background:rgba(22,23,27,.6);border:1px solid var(--line);border-radius:10px;padding:16px">
           <div class="row" style="font-size:16px"><span class="grow" style="font-weight:500">延遲（最近測試）</span><span class="num">當前：${fmtDelay(shown.delay)}</span></div>
@@ -300,13 +314,13 @@ function Nodes({ s, go }) {
             : html`<div class="empty" style="min-height:120px;font-size:14px">${shown.history.length === 0 ? '還沒有測試紀錄，按「測試延遲」開始' : ok.length === 0 ? '最近的測試都逾時，這個節點可能無法連線' : '再測試一次就能看到變化'}</div>`}
         </div>
         <div>
-          <div class="info" style="cursor:pointer" onClick=${() => go('subscriptions')}><span>所屬訂閱</span><span>${providerDisplay(s, shown.provider)} ›</span></div><div class="hr"></div>
+          ${isGroup(s, shown.name) ? html`<${Info} k="目前選擇" v=${cleanName(s.proxies[shown.name]?.now || '—')} /><div class="hr"></div>` : ''}
           <${Info} k="協定" v=${shown.type} /><div class="hr"></div>
           <${Info} k="伺服器" v=${detail?.server || '—'} /><div class="hr"></div>
           <${Info} k="連接埠" v=${detail?.port || '—'} /><div class="hr"></div>
         </div>
         <span class="grow"></span>
-        ${shown.provider === LOCAL ? html`<button class="btn full" onClick=${() => openEditor(shown)}>${I('pencil')}編輯節點</button>`
+        ${s.store.localLinks.some((l) => { const h = l.lastIndexOf('#'); try { return h >= 0 && decodeURIComponent(l.slice(h + 1)) === shown.name; } catch { return false; } }) ? html`<button class="btn full" onClick=${() => openEditor(shown)}>${I('pencil')}編輯節點</button>`
           : html`<button class="btn full" onClick=${() => act('testOne', shown.name)}>${I('gauge')}測試這個節點</button>`}`;
       })() : html`<div class="empty">選擇一個節點查看詳情</div>`}</div>
     </div>
@@ -333,6 +347,8 @@ function Subscriptions({ s }) {
   const pname = (sub) => 'sub-' + String(sub.id).toLowerCase();
   const live = subs.find((x) => x.id === draft?.id);
   const updating = (id) => s.updatingSubs.includes(id);
+  const [profGroups, setProfGroups] = useState([]);
+  useEffect(() => { if (draft?.id) act('profileInfo', draft.id).then((x) => setProfGroups(x.groups)); }, [draft?.id, live?.updatedAt]);
 
   return html`<div class="page">
     <div class="head"><h1 class="title">訂閱</h1><span class="subtitle">管理節點來源與更新</span><span class="spacer"></span>
@@ -341,22 +357,23 @@ function Subscriptions({ s }) {
     <div class="split">
       <div class="grow" style="overflow-y:auto;display:flex;flex-direction:column;gap:20px;padding:2px">
         ${!subs.length && html`<div class="card empty" style="min-height:260px">${I('link')}<div style="font-size:18px;font-weight:600;color:var(--text)">還沒有訂閱</div><div>按右上角「新增訂閱」，貼上機場給你的訂閱連結</div></div>`}
-        ${subs.map((sub) => { const p = s.providers[pname(sub)]; const info = p?.subscriptionInfo; const count = p?.proxies?.length;
-          const used = (info?.Download || 0) + (info?.Upload || 0); const total = info?.Total || 0;
+        ${subs.map((sub) => { const count = s.subCounts?.[sub.id];
+          const used = (sub.download || 0) + (sub.upload || 0); const total = sub.total || 0;
           return html`<div class=${'card' + (sub.id === selId ? ' hl' : '')} style="padding:22px 26px;display:flex;flex-direction:column;gap:16px;cursor:pointer" key=${sub.id} onClick=${() => pick(sub)}>
             <div class="row" onClick=${(e) => e.target.closest('button') && e.stopPropagation()}>
               <${Check} on=${sub.enabled} onChange=${(v) => act('setSubEnabled', sub.id, v)} />
               <span style="font-size:22px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub.name}</span>
-              <${Tag} text=${sub.enabled ? '已啟用' : '已停用'} kind=${sub.enabled ? '' : 'gray'} /><span class="grow"></span>
+              <${Tag} text=${sub.enabled ? '已啟用' : '已停用'} kind=${sub.enabled ? '' : 'gray'} />
+              ${sub.isProfile && sub.useProfile !== false && html`<${Tag} text="設定檔" kind=${s.profileId === sub.id ? '' : 'gray'} />`}<span class="grow"></span>
               <${Switch} on=${sub.enabled} label=${'啟用 ' + sub.name} onChange=${(v) => act('setSubEnabled', sub.id, v)} />
               <button class="icon-btn" aria-label="刪除訂閱" title="刪除訂閱" onClick=${() => { if (confirm(`確定要刪除「${sub.name}」？`)) act('deleteSubscription', sub.id); }}>${I('x')}</button>
               <button class="btn sm" disabled=${updating(sub.id) || !sub.url || !sub.enabled || !s.coreReady} onClick=${() => act('updateSubscription', sub.id)}>${updating(sub.id) ? '更新中' : '更新'}</button>
             </div>
-            <div class="row" style="font-size:17px;color:rgba(232,234,237,.9)">${I('server')}<span>節點數：${count ?? '—'}</span><span class="sep" style="height:20px"></span>${I('refresh')}<span>最後更新：${ago(parseDate(p?.updatedAt))}</span></div>
+            <div class="row" style="font-size:17px;color:rgba(232,234,237,.9)">${I('server')}<span>節點數：${count ?? '—'}</span><span class="sep" style="height:20px"></span>${I('refresh')}<span>最後更新：${ago(sub.updatedAt)}</span></div>
             ${sub.enabled && html`<div class="hr"></div>${total > 0 ? html`
               <div class="row" style="font-size:17px"><span class="grow">方案流量（來源提供）</span><span class="num">已用 ${fmtBytes(used)} / ${fmtBytes(total)}</span></div>
               <div class="bar"><div style=${{ width: Math.min(100, used / total * 100) + '%' }}></div></div>
-              ${info.Expire > 0 && html`<div class="mute" style="font-size:14px">到期：${new Date(info.Expire * 1000).toLocaleDateString('zh-TW')}</div>`}`
+              ${sub.expire > 0 && html`<div class="mute" style="font-size:14px">到期：${new Date(sub.expire * 1000).toLocaleDateString('zh-TW')}</div>`}`
               : html`<div class="row" style="font-size:17px">${I('info')}流量資訊未提供</div>`}`}
           </div>`; })}
       </div>
@@ -372,6 +389,11 @@ function Subscriptions({ s }) {
             <div class="row"><span class="grow" style="font-size:17px">自動更新</span><${Switch} on=${draft.autoUpdate} label="自動更新" onChange=${(v) => setDraft({ ...draft, autoUpdate: v })} /></div>
             ${draft.autoUpdate && html`<div class="row"><span class="grow" style="font-size:17px;padding-left:18px">更新間隔</span>
               <${Select} style="width:200px" options=${[[1, '每 1 小時'], [3, '每 3 小時'], [6, '每 6 小時'], [12, '每 12 小時'], [24, '每 24 小時']]} value=${draft.intervalHours} onChange=${(v) => setDraft({ ...draft, intervalHours: v })} /></div>`}
+            ${live?.isProfile && html`<div class="hr" style="margin:6px 0"></div>
+              <div class="row"><span style="font-size:17px">使用訂閱的分組與規則</span><span class="mute" title="這份訂閱是完整的 mihomo 設定檔。開啟時沿用它的策略組、規則和規則集；關閉時只取節點。同時只會有一份訂閱當設定檔。" style="display:inline-flex;width:18px">${I('info')}</span><span class="grow"></span>
+                <${Switch} on=${draft.useProfile !== false} label="使用訂閱的分組與規則" onChange=${(v) => setDraft({ ...draft, useProfile: v })} /></div>
+              ${draft.useProfile !== false && profGroups.length > 0 && html`<div class="row"><span class="grow" style="font-size:17px;padding-left:18px" title="規則頁中策略選「代理」的規則會走這個策略組">「代理」對應</span>
+                <${Select} style="width:220px" options=${profGroups.map((g) => [g, g])} value=${profGroups.includes(draft.mainGroup) ? draft.mainGroup : profGroups[0]} onChange=${(v) => setDraft({ ...draft, mainGroup: v })} /></div>`}`}
             <div class="hr" style="margin:6px 0"></div>
             <div class="row"><span style="font-size:17px">透過目前代理更新</span><span class="mute" title="用目前選擇的節點下載訂閱；第一次下載時還沒有節點，會先直接連線" style="display:inline-flex;width:18px">${I('info')}</span><span class="grow"></span>
               <${Switch} on=${draft.viaProxy} label="透過目前代理更新" onChange=${(v) => setDraft({ ...draft, viaProxy: v })} /></div>
@@ -413,6 +435,9 @@ function Rules({ s }) {
   const [dragIdx, setDragIdx] = useState(null);
   const [overIdx, setOverIdx] = useState(null);
   const isNew = draft && !rules.some((r) => r.id === draft.id);
+  const prof = s.store.subscriptions.find((x) => x.id === s.profileId);
+  const [subRules, setSubRules] = useState([]);
+  useEffect(() => { if (prof) act('profileInfo', prof.id).then((x) => setSubRules(x.rules)); else setSubRules([]); }, [prof?.id, prof?.updatedAt]);
   const ph = { 'DOMAIN-SUFFIX': 'example.com', DOMAIN: 'www.example.com', 'DOMAIN-KEYWORD': 'google', 'IP-CIDR': '192.168.0.0/16', 'SRC-IP-CIDR': '192.168.0.0/16', 'IP-CIDR6': '2001:db8::/32', 'DST-PORT': '443', 'PROCESS-NAME': 'Telegram.exe', GEOIP: 'CN', GEOSITE: 'google' };
   const pkind = (p) => p === '拒絕' ? 'red' : p === '直連' ? 'gray' : '';
   const save = () => { const d = { ...draft, payload: draft.payload.trim() }; act('setRules', isNew ? [d, ...rules] : rules.map((r) => r.id === d.id ? d : r)); setDraft(d); };
@@ -437,8 +462,9 @@ function Rules({ s }) {
       <button class="btn primary" onClick=${() => setDraft({ id: crypto.randomUUID(), type: 'DOMAIN-SUFFIX', payload: '', policy: '代理', enabled: true })}>${I('plus')}新增規則</button></div>
     <div class="card row" style="padding:14px;gap:18px;flex-shrink:0">
       <${Seg} options=${[['rule', '規則'], ['global', '全域'], ['direct', '直連']]} value=${s.store.settings.mode} onChange=${(m) => act('setMode', m)} style="flex:0 1 340px;min-width:220px" />
-      <span class="sep"></span><span style="font-size:17px;white-space:nowrap">預設策略：</span>
-      <${Select} options=${POLICIES.map((p) => [p, p])} value=${s.store.settings.defaultPolicy} onChange=${(p) => act('setDefaultPolicy', p)} style="flex:0 1 200px;min-width:120px" />
+      <span class="sep"></span>
+      ${prof ? html`<span class="mute" style="font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">使用訂閱「${prof.name}」的規則，你的規則優先</span>` : html`<span style="font-size:17px;white-space:nowrap">預設策略：</span>
+      <${Select} options=${POLICIES.map((p) => [p, p])} value=${s.store.settings.defaultPolicy} onChange=${(p) => act('setDefaultPolicy', p)} style="flex:0 1 200px;min-width:120px" />`}
       <span class="grow"></span>
       <${Search} value=${search} onInput=${setSearch} placeholder="搜尋規則" style="flex:0 1 340px" />
     </div>
@@ -456,11 +482,20 @@ function Rules({ s }) {
               <span class="c" style="width:80px" onClick=${(e) => e.stopPropagation()}><${Switch} on=${r.enabled} label=${'啟用規則 ' + (i + 1)} onChange=${(v) => toggle(r, v)} /></span>
               <span class="c" style="width:170px">${r.type}</span><span class="c f">${r.payload}</span>
               <span class="c" style="width:120px"><${Tag} text=${r.policy} kind=${pkind(r.policy)} icon=${POLICY_ICON[r.policy]} /></span></div>`)}
+          ${prof ? html`<div class="tr" style="min-height:44px;background:var(--header);font-size:14px;font-weight:500">以下是訂閱「${prof.name}」的 ${subRules.length} 條規則（唯讀，隨訂閱更新）</div>
+            ${subRules.map((raw, i) => (!search || raw.toLowerCase().includes(search.toLowerCase())) && (() => {
+              const parts = raw.split(','); const compound = /^(AND|OR|NOT|SUB-RULE)/.test(raw);
+              const type = parts[0]; const target = compound ? parts[parts.length - 1] : (parts.length > 2 ? parts[2] : parts[1] || '');
+              const payload = compound ? raw : (parts.length > 2 ? parts[1] : (type === 'MATCH' ? '其他連線' : ''));
+              return html`<div class="tr" style="min-height:54px;padding:0 10px;color:rgba(232,234,237,.75)" key=${'s' + i} title=${raw}>
+                <span style="width:40px"></span><span class="c num" style="width:50px">${rules.length + i + 1}</span><span style="width:80px"></span>
+                <span class="c" style="width:170px">${type}</span><span class="c f">${payload}</span>
+                <span class="c" style="width:120px"><${Tag} text=${target} kind=${target === 'REJECT' ? 'red' : /DIRECT|直连|直連/.test(target) ? 'gray' : ''} /></span></div>`; })())}` : html`
           <div class="tr" style="min-height:62px;padding:0 10px;border-bottom:0" title="最後一條：沒被上面規則命中的連線都走「預設策略」"
             onDragOver=${(e) => { e.preventDefault(); setOverIdx(rules.length); }} onDrop=${(e) => { e.preventDefault(); drop(rules.length); setOverIdx(null); }}>
             <span class="drag-handle">${I('lock')}</span><span class="c num" style="width:50px">${rules.length + 1}</span><span style="width:80px"></span>
             <span class="c" style="width:170px">MATCH</span><span class="c f">其他連線</span>
-            <span class="c" style="width:120px"><${Tag} text=${s.store.settings.defaultPolicy} kind=${pkind(s.store.settings.defaultPolicy)} icon=${POLICY_ICON[s.store.settings.defaultPolicy]} /></span></div>
+            <span class="c" style="width:120px"><${Tag} text=${s.store.settings.defaultPolicy} kind=${pkind(s.store.settings.defaultPolicy)} icon=${POLICY_ICON[s.store.settings.defaultPolicy]} /></span></div>`}
         </div>
       </div>
       <div class="card" style="width:320px;flex-shrink:0;padding:22px;display:flex;flex-direction:column;gap:10px">
@@ -560,6 +595,8 @@ function Settings({ s }) {
   const [login, setLogin] = useState(false);
   const [log, setLog] = useState(null);
   const [term, setTerm] = useState('');
+  const [ssidName, setSsidName] = useState('');
+  const [ssidAction, setSsidAction] = useState('direct');
   useEffect(() => { act('launchAtLogin').then(setLogin); act('terminalCommand').then(setTerm); }, [st.mixedPort]);
   const applyNet = () => {
     const a = +mp, b = +cpt;
@@ -586,6 +623,19 @@ function Settings({ s }) {
           <div class="row" style="font-size:14px"><span class="mute grow">目前狀態</span>
             ${s.tunActive ? html`<${Tag} text="已啟用" icon="shield" />` : st.tun && isWin && !s.isAdmin ? html`<${Tag} text="需要系統管理員權限" kind="red" />` : html`<${Tag} text="未啟用" kind="gray" />`}</div>
           ${isWin && html`<div class="mute" style="font-size:13px">目前${s.isAdmin ? '已' : '未'}以系統管理員身分執行。TUN 開啟時建議同時保留系統代理，兩者可以並存。</div>`}
+        <//>
+        <${Section} title="Wi-Fi 自動切換（SSID）">
+          <${ToggleRow} title="依 Wi-Fi 自動切換" hint="連到指定的 Wi-Fi 時自動切換模式或中斷代理，離開後恢復原本的設定" on=${!!st.ssidEnabled} onChange=${(v) => act('enableSSID', v)} />
+          ${st.ssidEnabled && html`<div class="hr"></div>
+            <div class="row" style="font-size:15px"><span class="mute grow">目前 Wi-Fi</span><span style="font-weight:500">${s.currentSSID || (s.platform === 'win32' ? '未連線 Wi-Fi（或系統未允許讀取位置）' : '只有 Windows 版會偵測')}</span></div>
+            ${(st.ssidRules || []).map((r) => html`<div class="row" key=${r.id}><span style=${{ color: r.ssid === s.currentSSID ? 'var(--accent)' : 'var(--mute)' }}>📶</span>
+              <span class="grow" style="font-size:16px;overflow:hidden;text-overflow:ellipsis">${r.ssid}</span>
+              <${Select} style="width:170px" options=${SSID_ACTIONS} value=${r.action} onChange=${(v) => act('setSSIDAction', r.id, v)} />
+              <button class="icon-btn" style="color:var(--red)" aria-label=${'刪除 ' + r.ssid} onClick=${() => act('removeSSIDRule', r.id)}>${I('x')}</button></div>`)}
+            <div class="row"><input class="field grow" placeholder="Wi-Fi 名稱" value=${ssidName} onInput=${(e) => setSsidName(e.target.value)} />
+              <${Select} style="width:170px" options=${SSID_ACTIONS} value=${ssidAction} onChange=${setSsidAction} />
+              <button class="btn primary" disabled=${!ssidName.trim()} onClick=${() => { act('addSSIDRule', ssidName, ssidAction); setSsidName(''); }}>加入</button></div>
+            ${s.currentSSID && !(st.ssidRules || []).some((r) => r.ssid === s.currentSSID) && html`<div><button class="btn sm" onClick=${() => setSsidName(s.currentSSID)}>加入目前的 Wi-Fi「${s.currentSSID}」</button></div>`}`}
         <//>
         <${Section} title="網路">
           <div class="row"><span class="grow" style="font-size:17px">混合代理埠（HTTP + SOCKS5）</span><input class="field" style="width:120px" value=${mp} onInput=${(e) => setMp(e.target.value)} /></div>
@@ -628,6 +678,7 @@ function Settings({ s }) {
 }
 
 // ================= 外框 =================
+const SSID_ACTIONS = [['direct', '切到直連模式'], ['rule', '切到規則模式'], ['global', '切到全域模式'], ['disconnect', '中斷系統代理']];
 const PAGES = [['overview', '總覽', 'home'], ['nodes', '節點', 'server'], ['subscriptions', '訂閱', 'layers'], ['rules', '規則', 'sliders'], ['connections', '連線', 'pulse'], ['settings', '設定', 'gear']];
 
 function App() {

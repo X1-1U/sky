@@ -9,6 +9,7 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   font-family: "Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei", -apple-system, "PingFang TC", sans-serif;
   -webkit-font-smoothing: antialiased; user-select: none; }
 #app { height: 100%; }
+svg { width: 20px; height: 20px; flex-shrink: 0; }
 button, input, select, textarea { font: inherit; color: inherit; }
 input, textarea { user-select: text; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
