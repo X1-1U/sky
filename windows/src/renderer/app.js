@@ -241,100 +241,94 @@ function Overview({ s, go }) {
   </div>`;
 }
 
+const TYPE_LABEL = { Selector: '手動選擇', URLTest: '自動測速', Fallback: '故障轉移', LoadBalance: '負載均衡', Relay: '鏈式代理' };
+const delayColor = (d) => d === 0 ? 'var(--red)' : d < 200 ? 'var(--accent)' : d < 500 ? 'var(--amber)' : '#FB923C';
+function resolveGroup(s, g) {
+  let n = s.proxies[g]?.now;
+  for (let i = 0; i < 8 && n && s.proxies[n]?.now; i++) n = s.proxies[n].now;
+  return n;
+}
+
+// 節點頁（參考 Clash Verge）：所有策略組由上往下排列，點標題展開，節點以卡片格狀顯示，點卡片直接切換
 function Nodes({ s, go }) {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
-  const [groupSel, setGroupSel] = useState(null);
-  const [sel, setSel] = useState(null);
   const [sortDelay, setSortDelay] = useState(false);
+  const [open, setOpen] = useState(() => new Set([s.mainGroup]));
+  const [testing, setTesting] = useState(new Set());
   const [modal, setModal] = useState(null);
-  const [detail, setDetail] = useState(null);
   const groups = groupList(s);
-  const group = groupSel && groups.includes(groupSel) ? groupSel : s.mainGroup;
-  const canSelect = s.proxies[group]?.type === 'Selector';
-  const all = members(s, group);
-  const cur = s.proxies[group]?.now;
-  let list = all.filter((n) => (filter !== 'fav' || s.store.favorites.includes(n.name))
-    && (filter !== 'low' || (n.delay > 0 && n.delay < 150))
-    && (!search || n.name.toLowerCase().includes(search.toLowerCase()) || n.type.toLowerCase().includes(search.toLowerCase())));
-  if (sortDelay) list = [...list].sort((a, b) => (a.delay || 1e9) - (b.delay || 1e9));
-  const shown = all.find((n) => n.name === (sel || cur)) || list[0];
-  useEffect(() => { if (shown && !isGroup(s, shown.name)) act('nodeDetail', shown.name).then(setDetail); else setDetail(null); }, [shown?.name]);
-  const groupOpts = groups.map((g) => [g, (g === s.mainGroup ? '★ ' : '') + g + (s.proxies[g]?.now ? ' · ' + cleanName(s.proxies[g].now) : '')]);
-  const status = (n) => n.name === cur ? ['使用中', 'solid'] : isGroup(s, n.name) ? ['策略組', 'gray'] : ['DIRECT', 'REJECT'].includes(n.name) ? ['內建', 'gray'] : n.delay == null ? ['未測試', 'gray'] : n.delay === 0 ? ['逾時', 'red'] : ['可用', ''];
   const prof = s.store.subscriptions.find((x) => x.id === s.profileId);
-  const pick = (name) => canSelect && act('select', name, group);
-
-  const openEditor = (n) => {
-    const idx = s.store.localLinks.findIndex((l) => { const h = l.lastIndexOf('#'); if (h >= 0) { try { return decodeURIComponent(l.slice(h + 1)) === n.name; } catch { return l.slice(h + 1) === n.name; } } return false; });
-    if (idx >= 0) setModal({ kind: 'edit', index: idx, text: s.store.localLinks[idx] });
+  const toggle = (g) => { const n = new Set(open); n.has(g) ? n.delete(g) : n.add(g); setOpen(n); };
+  const testGroup = async (g) => { setTesting((t) => new Set(t).add(g)); await act('testGroup', g); setTesting((t) => { const n = new Set(t); n.delete(g); return n; }); };
+  const items = (g) => {
+    let list = members(s, g).filter((n) => (filter !== 'fav' || s.store.favorites.includes(n.name) || isGroup(s, n.name))
+      && (filter !== 'low' || isGroup(s, n.name) || (n.delay > 0 && n.delay < 150))
+      && (!search || n.name.toLowerCase().includes(search.toLowerCase()) || n.type.toLowerCase().includes(search.toLowerCase())));
+    if (sortDelay) list = [...list].sort((a, b) => (a.delay || 1e9) - (b.delay || 1e9));
+    return list;
   };
+  const allOpen = groups.length > 0 && groups.every((g) => open.has(g));
 
   return html`<div class="page">
     <div class="head"><div><div class="row" style="gap:18px"><h1 class="title">節點</h1><${Pill} on=${s.systemProxyOn} text=${s.systemProxyOn ? '已連線' : '未連線'} /></div>
-      <div class="subtitle" style="margin-top:6px">${prof ? `使用訂閱「${prof.name}」的策略組` : '選擇連線節點'}</div></div>
+      <div class="subtitle" style="margin-top:6px">${prof ? `使用訂閱「${prof.name}」的 ${groups.length} 個策略組` : '選擇連線節點'}</div></div>
       <span class="spacer"></span>
-      <button class="btn" disabled=${s.testingDelay || !s.coreReady} onClick=${() => act('testGroup', group)}>${I('gauge')}${s.testingDelay ? '測試中…' : '測試延遲'}</button>
-      <button class="btn primary" onClick=${() => setModal({ kind: 'add', text: '' })}>${I('plus')}新增節點</button></div>
+      <button class="btn" onClick=${() => setOpen(allOpen ? new Set() : new Set(groups))}>${allOpen ? '全部收合' : '全部展開'}</button>
+      <button class="btn primary" onClick=${() => setModal({ text: '' })}>${I('plus')}新增節點</button></div>
     <div class="row">
       <${Search} value=${search} onInput=${setSearch} placeholder="搜尋節點" style="flex:0 1 340px" />
       ${[['all', '全部'], ['fav', '收藏'], ['low', '低延遲']].map(([v, l]) => html`<button class=${'chip' + (filter === v ? ' on' : '')} onClick=${() => setFilter(v)}>${l}</button>`)}
-      <span class="grow"></span><span class="sep"></span>
-      <${Select} options=${groupOpts} value=${group} onChange=${(g) => { setGroupSel(g); setSel(null); }} style="flex:0 1 380px;min-width:180px" />
+      <span class="grow"></span>
+      <button class="btn sm" onClick=${() => setSortDelay(!sortDelay)}>${sortDelay ? '依延遲排序' : '原始順序'}</button>
     </div>
-    <div class="split">
-      <div class="card table" style="padding:0 6px">
-        <div class="thead plain"><span style="width:90px"></span><span class="c f">節點名稱</span><span class="c" style="width:130px">協定</span>
-          <span class="c" style="width:90px;cursor:pointer" onClick=${() => setSortDelay(!sortDelay)}>延遲 ${sortDelay ? '↑' : '↕'}</span><span class="c" style="width:100px">狀態</span><span style="width:44px"></span></div>
-        ${all.length === 0 ? html`<div class="empty">${I('cloud')}<div>${s.coreReady ? '還沒有節點，先到「訂閱」新增訂閱連結，或按「新增節點」貼上分享連結' : '核心尚未啟動'}</div>
-            ${s.coreReady && html`<button class="btn sm" onClick=${() => go('subscriptions')}>前往訂閱</button>`}</div>` :
-          html`<div class="tbody">${list.map((n) => { const st = status(n); const fav = s.store.favorites.includes(n.name); const on = n.name === shown?.name; return html`
-            <div class=${'tr click' + (on ? ' sel' : '')} style="min-height:62px;padding:0 6px" key=${n.name} onClick=${() => setSel(n.name)} onDblClick=${() => pick(n.name)}>
-              <button class="icon-btn" style=${{ color: fav ? 'var(--accent)' : 'var(--text)', width: '46px' }} aria-label="收藏" onClick=${(e) => { e.stopPropagation(); act('toggleFavorite', n.name); }}>${html`<svg viewBox="0 0 24 24" fill=${fav ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d=${P.star} /></svg>`}</button>
-              <span style="width:44px;display:flex;justify-content:center"><${Flag} name=${n.name} /></span>
-              <span class="c f" style="font-size:17px">${cleanName(n.name)}</span>
-              <span class="c" style="width:130px">${n.type}</span>
-              <span class="c num" style="width:90px">${fmtDelay(n.delay)}</span>
-              <span class="c" style="width:100px"><${Tag} text=${st[0]} kind=${st[1]} /></span>
-              ${canSelect ? html`<button class="icon-btn" aria-label="使用此節點" title="使用此節點" onClick=${(e) => { e.stopPropagation(); pick(n.name); }}>${I('check')}</button>` : html`<span style="width:40px"></span>`}
-            </div>`; })}</div>`}
-        <div class="hr"></div>
-        <div class="row" style="height:50px;padding:0 18px;font-size:15px">共 ${all.length} 個節點 · ${list.length} 個已顯示</div>
-      </div>
-      <div class="card detail" style="padding:22px">${shown ? (() => {
-        const fav = s.store.favorites.includes(shown.name); const ok = shown.history.filter((h) => h.delay > 0);
-        return html`
-        <div class="row" style="align-items:flex-start"><${Flag} name=${shown.name} />
-          <div class="grow"><div style="font-size:24px;font-weight:500;line-height:1.3">${cleanName(shown.name)}</div>
-            <div style="margin-top:8px">${shown.name === cur ? html`<${Tag} text="使用中" />` : canSelect ? html`<button class="btn sm" onClick=${() => pick(shown.name)}>使用此節點</button>` : html`<${Tag} text="此策略組自動選擇" kind="gray" />`}</div></div>
-          <button class="icon-btn" style="color:var(--accent)" aria-label="收藏" onClick=${() => act('toggleFavorite', shown.name)}>${html`<svg viewBox="0 0 24 24" fill=${fav ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d=${P.star} /></svg>`}</button></div>
-        <div style="background:rgba(22,23,27,.6);border:1px solid var(--line);border-radius:10px;padding:16px">
-          <div class="row" style="font-size:16px"><span class="grow" style="font-weight:500">延遲（最近測試）</span><span class="num">當前：${fmtDelay(shown.delay)}</span></div>
-          ${ok.length >= 2 ? html`<div style="margin-top:8px"><${Chart} primary=${ok.map((h) => h.delay)} labels=${timeLabels(ok.map((h) => Date.parse(h.time)), Math.min(5, ok.length), hm)} format=${(v) => Math.round(v) + ' ms'} minMax=${20} labelWidth=${56} height=${140} /></div>`
-            : html`<div class="empty" style="min-height:120px;font-size:14px">${shown.history.length === 0 ? '還沒有測試紀錄，按「測試延遲」開始' : ok.length === 0 ? '最近的測試都逾時，這個節點可能無法連線' : '再測試一次就能看到變化'}</div>`}
-        </div>
-        <div>
-          ${isGroup(s, shown.name) ? html`<${Info} k="目前選擇" v=${cleanName(s.proxies[shown.name]?.now || '—')} /><div class="hr"></div>` : ''}
-          <${Info} k="協定" v=${shown.type} /><div class="hr"></div>
-          <${Info} k="伺服器" v=${detail?.server || '—'} /><div class="hr"></div>
-          <${Info} k="連接埠" v=${detail?.port || '—'} /><div class="hr"></div>
-        </div>
-        <span class="grow"></span>
-        ${s.store.localLinks.some((l) => { const h = l.lastIndexOf('#'); try { return h >= 0 && decodeURIComponent(l.slice(h + 1)) === shown.name; } catch { return false; } }) ? html`<button class="btn full" onClick=${() => openEditor(shown)}>${I('pencil')}編輯節點</button>`
-          : html`<button class="btn full" onClick=${() => act('testOne', shown.name)}>${I('gauge')}測試這個節點</button>`}`;
-      })() : html`<div class="empty">選擇一個節點查看詳情</div>`}</div>
-    </div>
-    ${modal?.kind === 'add' && html`<${Modal} title="新增節點" onClose=${() => setModal(null)}>
-      <div class="mute" style="font-size:14px">貼上節點分享連結，一行一個。支援 ss://、vmess://、vless://、trojan://、hysteria2://、tuic:// 等。</div>
-      <textarea class="field" rows="9" value=${modal.text} onInput=${(e) => setModal({ ...modal, text: e.target.value })}></textarea>
+    ${groups.length === 0 ? html`<div class="empty">${I('cloud')}<div>${s.coreReady ? '還沒有節點，先到「訂閱」新增訂閱連結，或按「新增節點」貼上分享連結' : '核心尚未啟動'}</div>
+        ${s.coreReady && html`<button class="btn sm" onClick=${() => go('subscriptions')}>前往訂閱</button>`}</div>` :
+      html`<div style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding-bottom:8px">
+        ${groups.map((g) => {
+          const info = s.proxies[g]; const now = info?.now; const fin = resolveGroup(s, g); const isOpen = open.has(g);
+          const selectable = info?.type === 'Selector';
+          const fd = fin ? s.proxies[fin]?.history?.slice(-1)[0]?.delay : null;
+          const list = isOpen ? items(g) : [];
+          return html`<div class="card" style="padding:0;flex-shrink:0" key=${g}>
+            <div class="row" style="height:66px;padding:0 16px;cursor:pointer;gap:12px" onClick=${() => toggle(g)}>
+              <span style=${{ display: 'inline-flex', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform .15s', color: 'var(--mute)' }}>${I('chevR')}</span>
+              <div style="min-width:0">
+                <div class="row" style="gap:8px"><span style="font-size:17px;font-weight:600;white-space:nowrap">${g}</span>
+                  <${Tag} text=${TYPE_LABEL[info?.type] || info?.type || ''} kind=${selectable ? '' : 'gray'} />
+                  ${g === s.mainGroup && html`<span title="規則頁中策略選「代理」的規則走這個策略組"><${Tag} text="「代理」" kind="gray" /></span>`}</div>
+                <div style="font-size:13px;color:rgba(232,234,237,.7);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                  ${now ? cleanName(now) : ''}${fin && fin !== now ? ` → ${cleanName(fin)}` : ''}</div>
+              </div>
+              <span class="grow"></span>
+              ${fd != null && html`<span class="num" style=${{ color: delayColor(fd), fontWeight: 600, fontSize: '14px' }}>${fmtDelay(fd)}</span>`}
+              <span class="mute" style="font-size:13px;background:var(--field);border-radius:999px;padding:3px 8px">${info?.all?.length || 0}</span>
+              <button class="icon-btn" title="測試這組的延遲" aria-label="測試這組的延遲" disabled=${testing.has(g)} onClick=${(e) => { e.stopPropagation(); testGroup(g); }}>${testing.has(g) ? '…' : I('gauge')}</button>
+            </div>
+            ${isOpen && html`<div class="hr"></div>
+              ${list.length === 0 ? html`<div class="mute" style="padding:20px;text-align:center;font-size:14px">沒有符合的節點</div>` :
+                html`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:10px;padding:14px">
+                  ${list.map((n) => { const sub = isGroup(s, n.name); const sel = n.name === now; const fav = s.store.favorites.includes(n.name);
+                    return html`<div key=${n.name} title=${sub ? `子策略組「${n.name}」` : n.name}
+                      style=${{ padding: '10px 12px', borderRadius: '9px', cursor: selectable || sub ? 'pointer' : 'default', background: sel ? 'var(--row-sel)' : 'rgba(36,38,43,.6)', border: `${sel ? 1.5 : 1}px solid ${sel ? 'var(--accent)' : 'var(--line)'}` }}
+                      onClick=${() => { if (selectable && !sel) act('select', n.name, g); else if (sub && !open.has(n.name)) toggle(n.name); }}
+                      onContextMenu=${(e) => { e.preventDefault(); act('toggleFavorite', n.name); }}>
+                      <div class="row" style="gap:6px">${sub ? html`<span style="color:var(--accent);display:inline-flex">${I('layers')}</span>` : html`<${Flag} name=${n.name} />`}
+                        <span style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1">${cleanName(n.name)}</span>
+                        ${fav && html`<span style="color:var(--accent);font-size:11px">★</span>`}</div>
+                      <div class="row" style="gap:6px;margin-top:8px;font-size:12px">
+                        <span class="mute" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1">${sub ? `${TYPE_LABEL[n.type] || n.type} → ${cleanName(resolveGroup(s, n.name) || '—')}` : n.type}</span>
+                        ${!sub && html`<span class="num" style=${{ fontWeight: 600, color: n.delay != null ? delayColor(n.delay) : 'var(--mute)', cursor: 'pointer' }} title="測試這個節點"
+                          onClick=${(e) => { e.stopPropagation(); act('testOne', n.name); }}>${n.delay == null ? '測速' : fmtDelay(n.delay)}</span>`}</div>
+                    </div>`; })}
+                </div>`}`}
+          </div>`; })}
+      </div>`}
+    ${modal && html`<${Modal} title="新增節點" onClose=${() => setModal(null)}>
+      <div class="mute" style="font-size:14px">貼上節點分享連結，一行一個。支援 ss://、vmess://、vless://、trojan://、hysteria2://、tuic:// 等。新增的節點會放在「其他節點」策略組（設定檔模式）或「代理」策略組。</div>
+      <textarea class="field" rows="9" value=${modal.text} onInput=${(e) => setModal({ text: e.target.value })}></textarea>
       <div class="row"><span class="grow"></span><button class="btn sm" onClick=${() => setModal(null)}>取消</button>
         <button class="btn primary" disabled=${!modal.text.includes('://')} onClick=${() => { act('addLinks', modal.text); setModal(null); }}>新增</button></div><//>`}
-    ${modal?.kind === 'edit' && html`<${Modal} title="編輯節點" onClose=${() => setModal(null)}>
-      <div class="mute" style="font-size:14px">修改分享連結；清空後儲存會刪除這個節點。</div>
-      <textarea class="field" rows="6" value=${modal.text} onInput=${(e) => setModal({ ...modal, text: e.target.value })}></textarea>
-      <div class="row"><button class="btn danger" onClick=${() => { act('setLocalLink', modal.index, ''); setModal(null); }}>刪除節點</button><span class="grow"></span>
-        <button class="btn sm" onClick=${() => setModal(null)}>取消</button>
-        <button class="btn primary" onClick=${() => { act('setLocalLink', modal.index, modal.text); setModal(null); }}>儲存</button></div><//>`}
   </div>`;
 }
 

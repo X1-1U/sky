@@ -1,26 +1,34 @@
 import SwiftUI
 
+/// 節點頁（參考 Clash Verge）：所有策略組由上往下排列，點標題展開，節點以卡片格狀顯示，點卡片直接切換
 struct NodesView: View {
     @EnvironmentObject var s: AppState
     @State private var search = ""
-    @State private var filter = 0            // 0 全部 1 收藏 2 低延遲
-    @State private var groupSel: String?
-    @State private var selected: String?
+    @State private var filter = 0                 // 0 全部 1 收藏 2 低延遲
+    @State private var expanded: Set<String> = []
+    @State private var didInit = false
     @State private var sortByDelay = false
     @State private var showAdd = false
     @State private var editingLink: EditLink?
+    @State private var testing: Set<String> = []
 
     struct EditLink: Identifiable { let id = UUID(); let index: Int; var text: String }
 
-    /// 目前在看的策略組（預設主要策略組）
-    var group: String { groupSel.flatMap { s.groups.contains($0) ? $0 : nil } ?? s.mainGroup }
-    var groupNow: String? { s.proxies[group]?.now }
-    var canSelect: Bool { s.proxies[group]?.type == "Selector" }
+    static func typeLabel(_ t: String?) -> String {
+        switch t {
+        case "Selector": return "手動選擇"
+        case "URLTest": return "自動測速"
+        case "Fallback": return "故障轉移"
+        case "LoadBalance": return "負載均衡"
+        case "Relay": return "鏈式代理"
+        default: return t ?? ""
+        }
+    }
 
-    var filtered: [NodeItem] {
-        var list = s.members(of: group)
-        if filter == 1 { list = list.filter { s.store.favorites.contains($0.name) } }
-        if filter == 2 { list = list.filter { ($0.delay ?? 0) > 0 && ($0.delay ?? 0) < 150 } }
+    private func items(_ g: String) -> [NodeItem] {
+        var list = s.members(of: g)
+        if filter == 1 { list = list.filter { s.store.favorites.contains($0.name) || s.isGroup($0.name) } }
+        if filter == 2 { list = list.filter { s.isGroup($0.name) || (($0.delay ?? 0) > 0 && ($0.delay ?? 0) < 150) } }
         if !search.isEmpty { list = list.filter { $0.name.localizedCaseInsensitiveContains(search) || $0.type.localizedCaseInsensitiveContains(search) } }
         if sortByDelay {
             list.sort { a, b in
@@ -33,101 +41,68 @@ struct NodesView: View {
     }
 
     var body: some View {
-        let all = s.members(of: group)
-        let list = filtered
-        let detailName = selected ?? groupNow
-        let detail = all.first { $0.name == detailName } ?? list.first
-
-        VStack(alignment: .leading, spacing: 20) {
+        let groups = s.groups
+        VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .top, spacing: 18) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 18) {
                         PageTitle(title: "節點")
                         StatusPill(text: s.systemProxyOn ? "已連線" : "未連線", on: s.systemProxyOn)
                     }
-                    Text(s.profileSub.map { "使用訂閱「\($0.name)」的策略組" } ?? "選擇連線節點").font(.system(size: 17)).foregroundColor(T.text.opacity(0.8))
+                    Text(s.profileSub.map { "使用訂閱「\($0.name)」的 \(groups.count) 個策略組" } ?? "選擇連線節點")
+                        .font(.system(size: 17)).foregroundColor(T.text.opacity(0.8))
                 }
                 Spacer()
-                Button { s.testGroup(group) } label: {
-                    Label(s.testingDelay ? "測試中…" : "測試延遲", systemImage: "gauge.with.dots.needle.33percent")
+                Button { expanded = expanded.count == groups.count ? [] : Set(groups) } label: {
+                    Label(expanded.count == groups.count && !groups.isEmpty ? "全部收合" : "全部展開", systemImage: "rectangle.expand.vertical")
                 }
                 .buttonStyle(GhostButton())
-                .disabled(s.testingDelay || !s.coreReady)
                 Button { showAdd = true } label: { Label("新增節點", systemImage: "plus") }
                     .buttonStyle(PrimaryButton())
             }
 
-            HStack(spacing: 14) {
+            HStack(spacing: 12) {
                 SearchField(placeholder: "搜尋節點", text: $search).frame(minWidth: 160, maxWidth: 340)
                 Chip(title: "全部", selected: filter == 0) { filter = 0 }
                 Chip(title: "收藏", selected: filter == 1) { filter = 1 }
                 Chip(title: "低延遲", selected: filter == 2) { filter = 2 }
                 Spacer(minLength: 0)
-                Rectangle().fill(T.line).frame(width: 1, height: 36)
-                Dropdown(options: s.groups.map { g in (g, groupLabel(g)) },
-                         selection: Binding(get: { group }, set: { groupSel = $0; selected = nil }))
-                    .frame(minWidth: 180, maxWidth: 380)
+                Button { sortByDelay.toggle() } label: {
+                    Label(sortByDelay ? "依延遲排序" : "原始順序", systemImage: sortByDelay ? "arrow.up.arrow.down.circle.fill" : "arrow.up.arrow.down.circle")
+                }
+                .buttonStyle(GhostButton(compact: true))
             }
 
-            HStack(alignment: .top, spacing: 20) {
-                VStack(spacing: 0) {
-                    HStack(spacing: 0) {
-                        Color.clear.frame(width: 96)
-                        Text("節點名稱").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("協定").frame(width: 130, alignment: .leading)
-                        Button { sortByDelay.toggle() } label: {
-                            HStack(spacing: 6) {
-                                Text("延遲")
-                                Image(systemName: sortByDelay ? "arrow.up" : "chevron.up.chevron.down").font(.system(size: 11, weight: .semibold))
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .frame(width: 90, alignment: .leading)
-                        Text("狀態").frame(width: 100, alignment: .leading)
-                        Color.clear.frame(width: 40)
-                    }
-                    .font(.system(size: 16, weight: .medium))
-                    .padding(.horizontal, 6)
-                    .frame(height: 64)
-
-                    if all.isEmpty {
-                        VStack(spacing: 12) {
-                            Image(systemName: "tray").font(.system(size: 34)).foregroundColor(T.mute)
-                            Text(s.coreReady ? "還沒有節點，先到「訂閱」新增訂閱連結，或按「新增節點」貼上分享連結" : "核心尚未啟動")
-                                .foregroundColor(T.mute).multilineTextAlignment(.center)
-                            if s.coreReady {
-                                Button("前往訂閱") { s.page = .subscriptions }.buttonStyle(GhostButton(compact: true))
-                            }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        ScrollView {
-                            LazyVStack(spacing: 0) {
-                                ForEach(list) { n in row(n, isDetail: n.name == detail?.name) }
-                            }
-                        }
-                    }
-                    Divider().overlay(T.line)
-                    HStack {
-                        Text("共 \(all.count) 個節點 · \(list.count) 個已顯示").foregroundColor(T.text.opacity(0.85))
-                        Spacer()
-                    }
-                    .font(.system(size: 15))
-                    .padding(.horizontal, 18)
-                    .frame(height: 50)
+            if groups.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "tray").font(.system(size: 34)).foregroundColor(T.mute)
+                    Text(s.coreReady ? "還沒有節點，先到「訂閱」新增訂閱連結，或按「新增節點」貼上分享連結" : "核心尚未啟動")
+                        .foregroundColor(T.mute).multilineTextAlignment(.center)
+                    if s.coreReady { Button("前往訂閱") { s.page = .subscriptions }.buttonStyle(GhostButton(compact: true)) }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(T.card, in: RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(T.line))
-
-                detailPanel(detail)
-                    .frame(width: 370)
-                    .frame(maxHeight: .infinity)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 12) {
+                            ForEach(groups, id: \.self) { g in
+                                groupSection(g).id(g)
+                            }
+                        }
+                        .padding(.bottom, 12)
+                    }
+                    .onAppear {
+                        guard !didInit else { return }
+                        didInit = true
+                        expanded = [s.mainGroup]
+                        if let target = ProcessInfo.processInfo.environment["SKY_EXPAND"] { expanded.insert(target); proxy.scrollTo(target, anchor: .top) }
+                    }
+                }
             }
         }
         .padding(.horizontal, 32)
         .padding(.top, 36)
-        .padding(.bottom, 24)
+        .padding(.bottom, 20)
         .sheet(isPresented: $showAdd) { AddLinksSheet { s.addLocalLinks($0) } }
         .sheet(item: $editingLink) { e in
             EditLinkSheet(text: e.text) { new in
@@ -142,148 +117,144 @@ struct NodesView: View {
         }
     }
 
-    private func groupLabel(_ g: String) -> String {
-        let now = s.proxies[g]?.now.map { " · " + Flags.cleanName($0) } ?? ""
-        return (g == s.mainGroup ? "★ " : "") + g + now
-    }
-
-    private func status(_ n: NodeItem) -> (String, TagKind) {
-        if n.name == groupNow { return ("使用中", .solidGreen) }
-        if s.isGroup(n.name) { return ("策略組", .gray) }
-        if n.name == "DIRECT" || n.name == "REJECT" { return ("內建", .gray) }
-        guard let d = n.delay else { return ("未測試", .gray) }
-        return d == 0 ? ("逾時", .red) : ("可用", .green)
-    }
+    // MARK: 一個策略組
 
     @ViewBuilder
-    private func row(_ n: NodeItem, isDetail: Bool) -> some View {
-        let fav = s.store.favorites.contains(n.name)
-        let st = status(n)
-        HStack(spacing: 0) {
-            Button { s.toggleFavorite(n.name) } label: {
-                Image(systemName: fav ? "star.fill" : "star")
-                    .font(.system(size: 19))
-                    .foregroundColor(fav ? T.accent : T.text.opacity(0.85))
+    private func groupSection(_ g: String) -> some View {
+        let open = expanded.contains(g)
+        let info = s.proxies[g]
+        let now = info?.now
+        let final = s.resolve(g)
+        let selectable = info?.type == "Selector"
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(T.mute)
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(g).font(.system(size: 17, weight: .semibold)).lineLimit(1)
+                        Tag(text: NodesView.typeLabel(info?.type), kind: selectable ? .green : .gray).fixedSize()
+                        if g == s.mainGroup { Tag(text: "「代理」", kind: .gray).fixedSize().help("規則頁中策略選「代理」的規則走這個策略組") }
+                    }
+                    HStack(spacing: 6) {
+                        if let now {
+                            Text(Flags.cleanName(now)).lineLimit(1)
+                            if let final, final != now {
+                                Image(systemName: "arrow.right").font(.system(size: 10))
+                                FlagView(name: final, size: 12)
+                                Text(Flags.cleanName(final)).lineLimit(1)
+                            }
+                        }
+                    }
+                    .font(.system(size: 13)).foregroundColor(T.text.opacity(0.7))
+                }
+                Spacer()
+                if let final, let d = s.proxies[final]?.lastDelay {
+                    Text(Fmt.delay(d)).font(.system(size: 14, weight: .semibold)).monospacedDigit().foregroundColor(delayColor(d))
+                }
+                Text("\(info?.all?.count ?? 0)").font(.system(size: 13)).foregroundColor(T.mute)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(T.field, in: Capsule())
+                Button { testGroup(g) } label: {
+                    if testing.contains(g) { ProgressView().controlSize(.small).frame(width: 20) }
+                    else { Image(systemName: "gauge.with.dots.needle.33percent").font(.system(size: 17)).foregroundColor(T.text) }
+                }
+                .buttonStyle(.plain).help("測試這組的延遲").disabled(testing.contains(g))
             }
-            .buttonStyle(.plain)
-            .frame(width: 46)
-            FlagView(name: n.name, size: 24).frame(width: 50)
-            Text(Flags.cleanName(n.name)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-            Text(n.type).lineLimit(1).frame(width: 130, alignment: .leading)
-            Text(n.delay == nil ? "—" : Fmt.delay(n.delay)).monospacedDigit().frame(width: 90, alignment: .leading)
-            Tag(text: st.0, kind: st.1).frame(width: 100, alignment: .leading)
-            Menu {
-                if canSelect { Button("使用此節點") { s.select(n.name, in: group) } }
-                Button("測試延遲") { s.testDelay(n.name) }
-                Button(fav ? "取消收藏" : "加入收藏") { s.toggleFavorite(n.name) }
-            } label: {
-                Image(systemName: "ellipsis").font(.system(size: 18, weight: .bold)).foregroundColor(T.text)
-                    .frame(width: 40, height: 40).contentShape(Rectangle())
+            .padding(.horizontal, 16)
+            .frame(height: 66)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    if open { expanded.remove(g) } else { expanded.insert(g) }
+                }
             }
-            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
-            .frame(width: 40)
+
+            if open {
+                let list = items(g)
+                Divider().overlay(T.line)
+                if list.isEmpty {
+                    Text("沒有符合的節點").font(.system(size: 14)).foregroundColor(T.mute).frame(maxWidth: .infinity).padding(20)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 215), spacing: 10)], spacing: 10) {
+                        ForEach(list) { n in nodeCard(n, group: g, selected: n.name == now, selectable: selectable) }
+                    }
+                    .padding(14)
+                }
+            }
         }
-        .font(.system(size: 17))
-        .foregroundColor(T.text)
-        .padding(.horizontal, 6)
-        .frame(height: 62)
-        .background(isDetail ? T.rowSel : Color.clear, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(isDetail ? T.accent.opacity(0.5) : Color.clear))
-        .overlay(alignment: .bottom) { if !isDetail { Divider().overlay(T.line).padding(.horizontal, 14) } }
-        .contentShape(Rectangle())
-        .onTapGesture { selected = n.name }
-        .onTapGesture(count: 2) { if canSelect { s.select(n.name, in: group) } }
+        .background(T.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(T.line))
     }
 
-    @ViewBuilder
-    private func detailPanel(_ n: NodeItem?) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if let n {
-                let inUse = n.name == groupNow
-                let fav = s.store.favorites.contains(n.name)
-                HStack(alignment: .top) {
-                    FlagView(name: n.name, size: 28)
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(Flags.cleanName(n.name)).font(.system(size: 26, weight: .medium)).lineLimit(2)
-                        if inUse {
-                            Tag(text: "使用中", kind: .green)
-                        } else if canSelect {
-                            Button("使用此節點") { s.select(n.name, in: group) }.buttonStyle(GhostButton(compact: true))
-                        } else {
-                            Tag(text: "此策略組自動選擇", kind: .gray)
-                        }
-                    }
-                    Spacer()
-                    Button { s.toggleFavorite(n.name) } label: {
-                        Image(systemName: fav ? "star.fill" : "star").font(.system(size: 22)).foregroundColor(T.accent)
-                    }
-                    .buttonStyle(.plain)
-                }
+    private func testGroup(_ g: String) {
+        testing.insert(g)
+        Task {
+            _ = try? await s.api.groupDelay(g, url: s.store.settings.testURL)
+            await s.refreshProxies()
+            testing.remove(g)
+        }
+    }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("延遲（最近測試）").font(.system(size: 16, weight: .medium))
-                        Spacer()
-                        Text("當前：\(Fmt.delay(n.delay))").font(.system(size: 16)).monospacedDigit()
-                    }
-                    let pts = n.history.filter { $0.delay > 0 }
-                    if pts.count >= 2 {
-                        AreaChart(primary: pts.map { Double($0.delay) },
-                                  xLabels: AreaChart.timeLabels(pts.compactMap { Fmt.parseDate($0.time) }, count: min(5, pts.count), formatter: Fmt.hm),
-                                  format: { "\(Int($0)) ms" },
-                                  ticks: 4, minMax: 20, labelWidth: 56)
-                            .frame(height: 140)
-                    } else {
-                        Text(n.history.isEmpty ? "還沒有測試紀錄，按「測試延遲」開始" : (pts.isEmpty ? "最近的測試都逾時，這個節點可能無法連線" : "再測試一次就能看到變化"))
-                            .font(.system(size: 14)).foregroundColor(T.mute)
-                            .frame(maxWidth: .infinity, minHeight: 120)
-                    }
-                }
-                .padding(16)
-                .background(T.bg.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(T.line))
+    private func delayColor(_ d: Int) -> Color {
+        d == 0 ? T.red : (d < 200 ? T.accent : (d < 500 ? T.amber : Color(hex: 0xFB923C)))
+    }
 
-                let addr = s.detailFile(for: n).flatMap { NodeDetails.lookup(name: n.name, file: $0) }
-                VStack(spacing: 0) {
-                    Button { s.page = .subscriptions } label: {
-                        HStack {
-                            Text("所屬訂閱")
-                            Spacer()
-                            Text(s.providerDisplayName(n.provider))
-                            Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-                        }
-                        .font(.system(size: 16)).foregroundColor(T.text)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .frame(height: 46)
-                    Divider().overlay(T.line)
-                    InfoRow(label: "協定", value: n.type).frame(height: 46)
-                    Divider().overlay(T.line)
-                    InfoRow(label: "伺服器", value: addr?.server ?? "—").frame(height: 46)
-                    Divider().overlay(T.line)
-                    InfoRow(label: "連接埠", value: addr?.port ?? "—").frame(height: 46)
-                    Divider().overlay(T.line)
+    // MARK: 節點卡片
+
+    private func nodeCard(_ n: NodeItem, group: String, selected: Bool, selectable: Bool) -> some View {
+        let sub = s.isGroup(n.name)
+        let fav = s.store.favorites.contains(n.name)
+        let addr = sub ? nil : s.detailFile(for: n).flatMap { NodeDetails.lookup(name: n.name, file: $0) }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                if sub { Image(systemName: "folder.fill").font(.system(size: 13)).foregroundColor(T.accent) }
+                else { FlagView(name: n.name, size: 15) }
+                Text(Flags.cleanName(n.name)).font(.system(size: 14, weight: .medium)).lineLimit(1)
+                Spacer(minLength: 0)
+                if fav { Image(systemName: "star.fill").font(.system(size: 10)).foregroundColor(T.accent) }
+            }
+            HStack(spacing: 6) {
+                Text(sub ? NodesView.typeLabel(n.type) : n.type).font(.system(size: 12)).foregroundColor(T.mute).lineLimit(1)
+                if sub, let r = s.resolve(n.name) {
+                    Text("→ \(Flags.cleanName(r))").font(.system(size: 12)).foregroundColor(T.mute).lineLimit(1)
                 }
                 Spacer(minLength: 0)
-                if n.provider == ConfigBuilder.localProvider {
-                    Button { openEditor(n) } label: { Label("編輯節點", systemImage: "pencil") }
-                        .buttonStyle(GhostButton(full: true))
-                } else {
-                    Button { s.testDelay(n.name) } label: { Label("測試這個節點", systemImage: "gauge.with.dots.needle.33percent") }
-                        .buttonStyle(GhostButton(full: true))
+                if !sub {
+                    Button { s.testDelay(n.name) } label: {
+                        Text(n.delay == nil ? "測速" : Fmt.delay(n.delay))
+                            .font(.system(size: 12, weight: .semibold)).monospacedDigit()
+                            .foregroundColor(n.delay.map(delayColor) ?? T.mute)
+                    }
+                    .buttonStyle(.plain).help("測試這個節點")
                 }
-            } else {
-                Spacer()
-                Text("選擇一個節點查看詳情").foregroundColor(T.mute).frame(maxWidth: .infinity)
-                Spacer()
             }
         }
-        .card(22)
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(selected ? T.rowSel : T.field.opacity(0.6), in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected ? T.accent : T.line, lineWidth: selected ? 1.5 : 1))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if selectable && !selected { s.select(n.name, in: group) }
+            else if sub { withAnimation { _ = expanded.insert(n.name) } }
+        }
+        .help(addr.map { "\($0.server):\($0.port)" } ?? (sub ? "子策略組「\(n.name)」" : n.name))
+        .contextMenu {
+            if selectable { Button("使用這個") { s.select(n.name, in: group) } }
+            if sub { Button("展開「\(n.name)」") { expanded.insert(n.name) } }
+            if !sub { Button("測試延遲") { s.testDelay(n.name) } }
+            Button(fav ? "取消收藏" : "加入收藏") { s.toggleFavorite(n.name) }
+            if let a = addr { Button("複製伺服器 \(a.server):\(a.port)") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("\(a.server):\(a.port)", forType: .string) } }
+            if isLocal(n) { Button("編輯節點") { openEditor(n) } }
+        }
     }
 
+    private func isLocal(_ n: NodeItem) -> Bool { n.provider == ConfigBuilder.localProvider }
+
     private func openEditor(_ n: NodeItem) {
-        // 在本機連結中找到名稱符合的那一條
         let idx = s.store.localLinks.firstIndex { link in
             if let hash = link.lastIndex(of: "#") {
                 return String(link[link.index(after: hash)...]).removingPercentEncoding == n.name

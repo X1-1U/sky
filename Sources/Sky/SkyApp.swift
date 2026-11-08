@@ -14,7 +14,7 @@ struct SkyApp: App {
                 .preferredColorScheme(.dark)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1320, height: 860)
+        .defaultSize(width: 1440, height: 900)
 
         MenuBarExtra {
             MenuPanel()
