@@ -229,8 +229,18 @@ async function disconnect() {
 // ---------- 定時更新 ----------
 async function refreshProxies() {
   if (!S.coreReady) return;
-  try { S.proxies = (await api('/proxies')).proxies; } catch {}
-  try { S.providers = (await api('/providers/proxies')).providers; } catch {}
+  let merged;
+  try { merged = (await api('/proxies')).proxies; } catch { return; }
+  try {
+    S.providers = (await api('/providers/proxies')).providers;
+    // /proxies 不含節點來源裡的節點；把它們（含延遲紀錄）合併進來
+    nodeProvider = {};
+    for (const [k, p] of Object.entries(S.providers)) {
+      if (!['HTTP', 'File'].includes(p.vehicleType)) continue;
+      for (const x of p.proxies || []) { nodeProvider[x.name] = k; if (!merged[x.name]) merged[x.name] = x; }
+    }
+  } catch {}
+  S.proxies = merged;
 }
 
 function startedAt(c) { return c.start ? Date.parse(c.start) || 0 : 0; }
@@ -284,10 +294,12 @@ async function loop() {
   }
 }
 
+let nodeProvider = {};
+/** 節點來源裡的節點要用 /providers/proxies/{來源}/{節點}/healthcheck，/proxies/{節點}/delay 會 404 */
 async function delay(name) {
-  try {
-    await api(`/proxies/${enc(name)}/delay`, { query: { url: store.settings.testURL, timeout: '5000' }, timeout: 8000 });
-  } catch {}
+  const prov = nodeProvider[name];
+  const p = prov ? `/providers/proxies/${enc(prov)}/${enc(name)}/healthcheck` : `/proxies/${enc(name)}/delay`;
+  try { await api(p, { query: { url: store.settings.testURL, timeout: '5000' }, timeout: 8000 }); } catch {}
 }
 
 const GROUP_TYPES = new Set(['Selector', 'URLTest', 'Fallback', 'LoadBalance', 'Relay']);

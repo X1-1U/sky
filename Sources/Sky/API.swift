@@ -69,8 +69,10 @@ struct MihomoAPI {
     }
 
     /// 回傳毫秒；逾時或失敗回傳 0
-    func delay(_ name: String, url: String, timeout: Int = 5000) async -> Int {
-        guard let d = try? await request("/proxies/\(MihomoAPI.enc(name))/delay", query: ["url": url, "timeout": "\(timeout)"], timeout: Double(timeout) / 1000 + 3),
+    /// 節點來源裡的節點要用 /providers/proxies/{來源}/{節點}/healthcheck，/proxies/{節點}/delay 會 404
+    func delay(_ name: String, provider: String? = nil, url: String, timeout: Int = 5000) async -> Int {
+        let path = provider.map { "/providers/proxies/\(MihomoAPI.enc($0))/\(MihomoAPI.enc(name))/healthcheck" } ?? "/proxies/\(MihomoAPI.enc(name))/delay"
+        guard let d = try? await request(path, query: ["url": url, "timeout": "\(timeout)"], timeout: Double(timeout) / 1000 + 3),
               let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return 0 }
         return obj["delay"] as? Int ?? 0
     }

@@ -296,13 +296,20 @@ final class AppState: ObservableObject {
 
     func refreshProxies() async {
         guard coreReady else { return }
-        if let p = try? await api.proxies() { proxies = p }
+        guard var merged = try? await api.proxies() else { return }
         if let p = try? await api.providers() {
             providers = p
+            // /proxies 不含節點來源裡的節點；把它們（含延遲紀錄）合併進來
             var map: [String: String] = [:]
-            for (k, v) in p where v.isUserProvider { for x in v.proxies ?? [] { map[x.name] = k } }
+            for (k, v) in p where v.isUserProvider {
+                for x in v.proxies ?? [] {
+                    map[x.name] = k
+                    if merged[x.name] == nil { merged[x.name] = x }
+                }
+            }
             nodeProvider = map
         }
+        proxies = merged
     }
 
     // MARK: - 節點與策略組
@@ -410,14 +417,14 @@ final class AppState: ObservableObject {
 
     func testDelay(_ name: String) {
         Task {
-            _ = await api.delay(name, url: store.settings.testURL)
+            _ = await api.delay(name, provider: nodeProvider[name], url: store.settings.testURL)
             await refreshProxies()
         }
     }
 
     private func testCurrentNode() async {
         guard let n = currentNode, n != "DIRECT" else { return }
-        _ = await api.delay(n, url: store.settings.testURL)
+        _ = await api.delay(n, provider: nodeProvider[n], url: store.settings.testURL)
     }
 
     func toggleFavorite(_ name: String) {
