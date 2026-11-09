@@ -3,6 +3,7 @@ import SwiftUI
 /// 點選單列圖示跳出的面板
 struct MenuPanel: View {
     @EnvironmentObject var s: AppState
+    @EnvironmentObject var live: LiveStats
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -51,9 +52,9 @@ struct MenuPanel: View {
                 }
                 .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
                 HStack {
-                    Label(Fmt.speed(s.upSpeed), systemImage: "arrow.up").foregroundColor(Color(hex: 0x7DD3FC))
+                    Label(Fmt.speed(live.upSpeed), systemImage: "arrow.up").foregroundColor(Color(hex: 0x7DD3FC))
                     Spacer()
-                    Label(Fmt.speed(s.downSpeed), systemImage: "arrow.down").foregroundColor(T.accent)
+                    Label(Fmt.speed(live.downSpeed), systemImage: "arrow.down").foregroundColor(T.accent)
                     Spacer()
                 }
                 .font(.system(size: 13).monospacedDigit())

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct OverviewView: View {
     @EnvironmentObject var s: AppState
+    @EnvironmentObject var live: LiveStats
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -17,8 +18,8 @@ struct OverviewView: View {
 
             HStack(spacing: 18) {
                 StatCard(icon: "arrow.left.arrow.right", title: "延遲", value: Fmt.delay(s.currentDelay))
-                StatCard(icon: "arrow.down.to.line", title: "下載", value: Fmt.speed(s.downSpeed), iconColor: T.accent)
-                StatCard(icon: "arrow.up.to.line", title: "上傳", value: Fmt.speed(s.upSpeed), iconColor: T.accent)
+                StatCard(icon: "arrow.down.to.line", title: "下載", value: Fmt.speed(live.downSpeed), iconColor: T.accent)
+                StatCard(icon: "arrow.up.to.line", title: "上傳", value: Fmt.speed(live.upSpeed), iconColor: T.accent)
                 StatCard(icon: "clock", title: "連線時間",
                          value: s.connectedSince.map { Fmt.duration(Date().timeIntervalSince($0)) } ?? "--:--:--")
             }
@@ -30,9 +31,9 @@ struct OverviewView: View {
                         Spacer()
                         Legend()
                     }
-                    AreaChart(primary: s.history.map(\.down),
-                              secondary: s.history.map(\.up),
-                              xLabels: AreaChart.timeLabels(s.history.map(\.date), count: 6),
+                    AreaChart(primary: live.history.map(\.down),
+                              secondary: live.history.map(\.up),
+                              xLabels: AreaChart.timeLabels(live.history.map(\.date), count: 6),
                               format: AreaChart.speedLabel,
                               ticks: 8,
                               minMax: 1024 * 1024, bytesScale: true)
@@ -72,12 +73,12 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Text("最近連線").font(.system(size: 19, weight: .semibold))
                 TableHeader(columns: [("應用程式", nil), ("目的地", nil), ("策略", 220), ("流量", 140)])
-                if s.connections.isEmpty {
+                if live.connections.isEmpty {
                     Text(s.coreReady ? "目前沒有連線" : "核心尚未啟動")
                         .foregroundColor(T.mute).font(.system(size: 15))
                         .frame(maxWidth: .infinity, minHeight: 60)
                 } else {
-                    ForEach(s.connections.prefix(4)) { c in
+                    ForEach(live.connections.prefix(4)) { c in
                         HStack(spacing: 0) {
                             HStack(spacing: 14) {
                                 Image(nsImage: AppIcons.icon(c.metadata.processPath)).resizable().frame(width: 30, height: 30)

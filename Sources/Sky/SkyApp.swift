@@ -10,6 +10,7 @@ struct SkyApp: App {
         Window("Sky", id: "main") {
             RootView()
                 .environmentObject(state)
+                .environmentObject(state.live)
                 .frame(minWidth: 1200, minHeight: 780)
                 .preferredColorScheme(.dark)
         }
@@ -19,6 +20,7 @@ struct SkyApp: App {
         MenuBarExtra {
             MenuPanel()
                 .environmentObject(state)
+                .environmentObject(state.live)
                 .preferredColorScheme(.dark)
         } label: {
             Image(systemName: state.systemProxyOn ? "paperplane.fill" : "paperplane")

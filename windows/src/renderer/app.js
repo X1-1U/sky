@@ -199,9 +199,20 @@ function nodeList(s) {
 }
 const providerDisplay = (s, key) => key === LOCAL ? '本機節點' : (s.store.subscriptions.find((x) => 'sub-' + String(x.id).toLowerCase() === key)?.name || key);
 
+// ---------- 每秒變動的資料（速度、流量圖、連線）：只有需要的頁面訂閱，其他頁面不會每秒重畫 ----------
+let liveData = { down: 0, up: 0, history: [], connections: [], activeCount: 0, connHistory: [] };
+const liveSubs = new Set();
+sky.onLive((x) => { liveData = x; liveSubs.forEach((f) => f(x)); });
+function useLive() {
+  const [l, setL] = useState(liveData);
+  useEffect(() => { liveSubs.add(setL); return () => liveSubs.delete(setL); }, []);
+  return l;
+}
+
 // ================= 頁面 =================
 
 function Overview({ s, go }) {
+  const L = useLive();
   const node = currentNode(s);
   const d = node ? s.proxies[node]?.history?.slice(-1)[0]?.delay : null;
   return html`<div class="page">
@@ -211,14 +222,14 @@ function Overview({ s, go }) {
       <button class="btn primary" disabled=${!s.coreReady} onClick=${() => act('toggleConnection')}>${s.systemProxyOn ? '中斷連線' : '連線'}</button></div>
     <div class="stats">
       <${Stat} icon="swap" k="延遲" v=${fmtDelay(d)} />
-      <${Stat} icon="down" k="下載" v=${fmtSpeed(s.down)} accent />
-      <${Stat} icon="up" k="上傳" v=${fmtSpeed(s.up)} accent />
+      <${Stat} icon="down" k="下載" v=${fmtSpeed(L.down)} accent />
+      <${Stat} icon="up" k="上傳" v=${fmtSpeed(L.up)} accent />
       <${Stat} icon="clock" k="連線時間" v=${s.connectedSince ? fmtDur(Date.now() - s.connectedSince) : '--:--:--'} />
     </div>
     <div class="row" style="align-items:stretch;gap:20px;flex-shrink:0">
       <div class="card grow" style="padding:20px">
         <div class="row"><h3 class="grow">即時流量</h3><${Legend} /></div>
-        <div style="margin-top:10px"><${Chart} primary=${s.history.map((x) => x.down)} secondary=${s.history.map((x) => x.up)} labels=${timeLabels(s.history.map((x) => x.t), 6)} format=${speedLabel} ticks=${8} minMax=${1048576} bytes height=${230} /></div>
+        <div style="margin-top:10px"><${Chart} primary=${L.history.map((x) => x.down)} secondary=${L.history.map((x) => x.up)} labels=${timeLabels(L.history.map((x) => x.t), 6)} format=${speedLabel} ticks=${8} minMax=${1048576} bytes height=${190} /></div>
       </div>
       <div class="card" style="width:380px;flex-shrink:0;padding:20px;display:flex;flex-direction:column;gap:16px">
         <h3>當前節點</h3>
@@ -231,8 +242,8 @@ function Overview({ s, go }) {
     <div class="card" style="padding:20px;flex:1;min-height:0;display:flex;flex-direction:column;gap:12px">
       <h3>最近連線</h3>
       <div class="thead"><span class="c f">應用程式</span><span class="c f">目的地</span><span class="c" style="width:200px">策略</span><span class="c" style="width:130px">流量</span></div>
-      ${s.connections.length === 0 ? html`<div class="empty">${s.coreReady ? '目前沒有連線' : '核心尚未啟動'}</div>` :
-        html`<div class="tbody">${s.connections.slice(0, 6).map((c) => html`<div class="tr" key=${c.id}>
+      ${L.connections.length === 0 ? html`<div class="empty">${s.coreReady ? '目前沒有連線' : '核心尚未啟動'}</div>` :
+        html`<div class="tbody">${L.connections.slice(0, 6).map((c) => html`<div class="tr" key=${c.id}>
           <span class="c f row" style="gap:14px"><${AppIcon} path=${c.metadata.processPath} />${appName(c)}</span>
           <span class="c f">${destination(c)}</span>
           <span class="c" style="width:200px">${policyLabel(c) === '代理' ? '規則代理' : policyLabel(c)}</span>
@@ -521,25 +532,26 @@ function Rules({ s }) {
 }
 
 function Connections({ s }) {
+  const L = useLive();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const [sel, setSel] = useState(null);
-  const list = s.connections.filter((c) => (filter === 'all' || (filter === 'proxy' && policyLabel(c) === '代理') || (filter === 'direct' && policyLabel(c) === '直連'))
+  const list = L.connections.filter((c) => (filter === 'all' || (filter === 'proxy' && policyLabel(c) === '代理') || (filter === 'direct' && policyLabel(c) === '直連'))
     && (!search || appName(c).toLowerCase().includes(search.toLowerCase()) || destination(c).toLowerCase().includes(search.toLowerCase())));
-  const d = s.connections.find((c) => c.id === sel) || list[0];
+  const d = L.connections.find((c) => c.id === sel) || list[0];
   useEffect(() => { act('watchConnection', d?.id || null); }, [d?.id]);
   useEffect(() => () => act('watchConnection', null), []);
   const kind = (c) => ({ '直連': 'gray', '拒絕': 'red' })[policyLabel(c)] || 'solid';
-  const h = s.connHistory;
+  const h = L.connHistory;
 
   return html`<div class="page">
     <div class="head"><h1 class="title">連線</h1><${Pill} on=${!s.pausedConnections} text=${s.pausedConnections ? '已暫停' : '即時更新'} /><span class="spacer"></span>
       <button class="btn" onClick=${() => act('setPaused', !s.pausedConnections)}>${I(s.pausedConnections ? 'play' : 'pause')}${s.pausedConnections ? '繼續更新' : '暫停更新'}</button>
-      <button class="btn danger" disabled=${!s.connections.length} onClick=${() => act('closeAll')}>中斷全部</button></div>
+      <button class="btn danger" disabled=${!L.connections.length} onClick=${() => act('closeAll')}>中斷全部</button></div>
     <div class="stats three">
-      <${Stat} icon="link" k="活動連線" v=${s.activeCount} />
-      <${Stat} icon="down" k="下載" v=${fmtSpeed(s.down)} accent />
-      <${Stat} icon="up" k="上傳" v=${fmtSpeed(s.up)} accent />
+      <${Stat} icon="link" k="活動連線" v=${L.activeCount} />
+      <${Stat} icon="down" k="下載" v=${fmtSpeed(L.down)} accent />
+      <${Stat} icon="up" k="上傳" v=${fmtSpeed(L.up)} accent />
     </div>
     <div class="split">
       <div class="card table" style="padding:16px;gap:14px">
@@ -552,7 +564,7 @@ function Connections({ s }) {
             <span class="c f">${destination(c)}</span><span class="c" style="width:90px"><${Tag} text=${policyLabel(c)} kind=${kind(c)} /></span>
             <span class="c num" style="width:100px">${fmtBytes(c.download)}</span><span class="c num" style="width:90px">${fmtBytes(c.upload)}</span></div>`)}</div>`}
         <div class="hr"></div>
-        <div style="font-size:15px;color:rgba(232,234,237,.85)">顯示 ${list.length} 筆 · 共 ${s.activeCount} 條活動連線</div>
+        <div style="font-size:15px;color:rgba(232,234,237,.85)">顯示 ${list.length} 筆 · 共 ${L.activeCount} 條活動連線</div>
       </div>
       <div class="card detail" style="width:420px;padding:20px">
         <h3>連線詳情</h3>

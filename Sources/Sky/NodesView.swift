@@ -208,7 +208,6 @@ struct NodesView: View {
     private func nodeCard(_ n: NodeItem, group: String, selected: Bool, selectable: Bool) -> some View {
         let sub = s.isGroup(n.name)
         let fav = s.store.favorites.contains(n.name)
-        let addr = sub ? nil : s.detailFile(for: n).flatMap { NodeDetails.lookup(name: n.name, file: $0) }
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 if sub { Image(systemName: "folder.fill").font(.system(size: 13)).foregroundColor(T.accent) }
@@ -241,13 +240,22 @@ struct NodesView: View {
             if selectable && !selected { s.select(n.name, in: group) }
             else if sub { withAnimation { _ = expanded.insert(n.name) } }
         }
-        .help(addr.map { "\($0.server):\($0.port)" } ?? (sub ? "子策略組「\(n.name)」" : n.name))
+        .help(sub ? "子策略組「\(n.name)」" : n.name)
         .contextMenu {
             if selectable { Button("使用這個") { s.select(n.name, in: group) } }
             if sub { Button("展開「\(n.name)」") { expanded.insert(n.name) } }
             if !sub { Button("測試延遲") { s.testDelay(n.name) } }
             Button(fav ? "取消收藏" : "加入收藏") { s.toggleFavorite(n.name) }
-            if let a = addr { Button("複製伺服器 \(a.server):\(a.port)") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("\(a.server):\(a.port)", forType: .string) } }
+            if !sub {
+                Button("複製伺服器位址") {
+                    // 要用時才去訂閱檔裡找，不在每次重畫時讀檔
+                    if let a = s.detailFile(for: n).flatMap({ NodeDetails.lookup(name: n.name, file: $0) }) {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString("\(a.server):\(a.port)", forType: .string)
+                        s.showToast("已複製 \(a.server):\(a.port)")
+                    } else { s.showToast("找不到這個節點的伺服器位址") }
+                }
+            }
             if isLocal(n) { Button("編輯節點") { openEditor(n) } }
         }
     }

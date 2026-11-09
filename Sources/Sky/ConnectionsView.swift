@@ -2,12 +2,13 @@ import SwiftUI
 
 struct ConnectionsView: View {
     @EnvironmentObject var s: AppState
+    @EnvironmentObject var live: LiveStats
     @State private var search = ""
     @State private var filter = "all"
     @State private var selectedID: String?
 
     var filtered: [Conn] {
-        s.connections.filter { c in
+        live.connections.filter { c in
             (filter == "all" || (filter == "proxy" && c.policyLabel == "代理") || (filter == "direct" && c.policyLabel == "直連"))
             && (search.isEmpty || AppIcons.name(c).localizedCaseInsensitiveContains(search) || c.destination.localizedCaseInsensitiveContains(search))
         }
@@ -15,26 +16,26 @@ struct ConnectionsView: View {
 
     var body: some View {
         let list = filtered
-        let detail = s.connections.first { $0.id == selectedID } ?? list.first
+        let detail = live.connections.first { $0.id == selectedID } ?? list.first
 
         VStack(alignment: .leading, spacing: 20) {
             HStack(spacing: 18) {
                 PageTitle(title: "連線")
-                StatusPill(text: s.pausedConnections ? "已暫停" : "即時更新", on: !s.pausedConnections)
+                StatusPill(text: live.pausedConnections ? "已暫停" : "即時更新", on: !live.pausedConnections)
                 Spacer()
-                Button { s.pausedConnections.toggle() } label: {
-                    Label(s.pausedConnections ? "繼續更新" : "暫停更新", systemImage: s.pausedConnections ? "play.fill" : "pause.fill")
+                Button { live.pausedConnections.toggle() } label: {
+                    Label(live.pausedConnections ? "繼續更新" : "暫停更新", systemImage: live.pausedConnections ? "play.fill" : "pause.fill")
                 }
                 .buttonStyle(GhostButton())
                 Button("中斷全部") { s.closeAllConnections() }
                     .buttonStyle(DangerButton())
-                    .disabled(s.connections.isEmpty)
+                    .disabled(live.connections.isEmpty)
             }
 
             HStack(spacing: 18) {
-                StatCard(icon: "link", title: "活動連線", value: "\(s.activeCount)")
-                StatCard(icon: "arrow.down.to.line", title: "下載", value: Fmt.speed(s.downSpeed), iconColor: T.accent)
-                StatCard(icon: "arrow.up.to.line", title: "上傳", value: Fmt.speed(s.upSpeed), iconColor: T.accent)
+                StatCard(icon: "link", title: "活動連線", value: "\(live.activeCount)")
+                StatCard(icon: "arrow.down.to.line", title: "下載", value: Fmt.speed(live.downSpeed), iconColor: T.accent)
+                StatCard(icon: "arrow.up.to.line", title: "上傳", value: Fmt.speed(live.upSpeed), iconColor: T.accent)
             }
 
             HStack(alignment: .top, spacing: 20) {
@@ -59,7 +60,7 @@ struct ConnectionsView: View {
                     }
                     Divider().overlay(T.line)
                     HStack {
-                        Text("顯示 \(list.count) 筆 · 共 \(s.activeCount) 條活動連線").foregroundColor(T.text.opacity(0.85))
+                        Text("顯示 \(list.count) 筆 · 共 \(live.activeCount) 條活動連線").foregroundColor(T.text.opacity(0.85))
                         Spacer()
                     }
                     .font(.system(size: 15))
@@ -139,7 +140,7 @@ struct ConnectionsView: View {
                     Spacer()
                     Legend().font(.system(size: 14))
                 }
-                let h = s.connHistory[c.id] ?? []
+                let h = live.connHistory[c.id] ?? []
                 AreaChart(primary: h.map(\.down), secondary: h.map(\.up),
                           xLabels: AreaChart.timeLabels(h.map(\.date), count: 5, formatter: Fmt.hm),
                           format: AreaChart.speedLabel, ticks: 4, minMax: 64 * 1024, labelWidth: 72, bytesScale: true)

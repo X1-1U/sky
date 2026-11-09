@@ -163,7 +163,7 @@ struct DelayPoint: Decodable, Hashable {
     let delay: Int
 }
 
-struct ProxyInfo: Decodable {
+struct ProxyInfo: Decodable, Equatable {
     let name: String
     let type: String
     let now: String?
@@ -174,14 +174,14 @@ struct ProxyInfo: Decodable {
     var lastDelay: Int? { history?.last?.delay }
 }
 
-struct SubInfo: Decodable {
+struct SubInfo: Decodable, Equatable {
     let Upload: Int64?
     let Download: Int64?
     let Total: Int64?
     let Expire: Int64?
 }
 
-struct ProviderInfo: Decodable {
+struct ProviderInfo: Decodable, Equatable {
     let name: String
     let type: String?
     let vehicleType: String?

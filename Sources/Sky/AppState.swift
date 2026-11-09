@@ -47,16 +47,11 @@ final class AppState: ObservableObject {
 
     @Published var proxies: [String: ProxyInfo] = [:]
     @Published var providers: [String: ProviderInfo] = [:]
-    @Published var connections: [Conn] = []
-    @Published var activeCount = 0
-    @Published var downSpeed: Double = 0
-    @Published var upSpeed: Double = 0
-    @Published var history: [SpeedSample] = []
-    @Published var connHistory: [String: [SpeedSample]] = [:]
-    @Published var pausedConnections = false
     @Published var testingDelay = false
     @Published var updatingSubs: Set<UUID> = []
     @Published var toast: String?
+    /// 每秒更新的資料放這裡，避免整個畫面每秒重畫
+    let live = LiveStats()
     @Published var tunActive = false
     @Published var appUpdate: AppUpdate?
     @Published var coreUpdate: CoreUpdate?
@@ -265,12 +260,14 @@ final class AppState: ObservableObject {
         let now = Date()
         if let (t, d, u) = lastTotals {
             let dt = max(0.2, now.timeIntervalSince(t))
-            downSpeed = max(0, Double(r.downloadTotal - d) / dt)
-            upSpeed = max(0, Double(r.uploadTotal - u) / dt)
+            live.downSpeed = max(0, Double(r.downloadTotal - d) / dt)
+            live.upSpeed = max(0, Double(r.uploadTotal - u) / dt)
         }
         lastTotals = (now, r.downloadTotal, r.uploadTotal)
-        history.append(SpeedSample(date: now, down: downSpeed, up: upSpeed))
-        if history.count > 300 { history.removeFirst(history.count - 300) }
+        var hist = live.history
+        hist.append(SpeedSample(date: now, down: live.downSpeed, up: live.upSpeed))
+        if hist.count > 300 { hist.removeFirst(hist.count - 300) }
+        live.history = hist
 
         let conns = r.connections ?? []
         var newHist: [String: [SpeedSample]] = [:]
@@ -280,17 +277,18 @@ final class AppState: ObservableObject {
             let s = SpeedSample(date: now,
                                 down: prev.map { Double(max(0, c.download - $0.0)) } ?? 0,
                                 up: prev.map { Double(max(0, c.upload - $0.1)) } ?? 0)
-            var h = connHistory[c.id] ?? []
+            var h = live.connHistory[c.id] ?? []
             h.append(s)
             if h.count > 120 { h.removeFirst(h.count - 120) }
             newHist[c.id] = h
             newBytes[c.id] = (c.download, c.upload)
         }
-        connHistory = newHist
+        live.connHistory = newHist
         lastConnBytes = newBytes
-        activeCount = conns.count
-        if !pausedConnections {
-            connections = conns.sorted { ($0.startDate ?? .distantPast) > ($1.startDate ?? .distantPast) }
+        if live.activeCount != conns.count { live.activeCount = conns.count }
+        if !live.pausedConnections {
+            // ISO 時間字串可以直接比較大小，不必每次比較都解析成日期
+            live.connections = conns.sorted { ($0.start ?? "") > ($1.start ?? "") }
         }
     }
 
@@ -298,7 +296,7 @@ final class AppState: ObservableObject {
         guard coreReady else { return }
         guard var merged = try? await api.proxies() else { return }
         if let p = try? await api.providers() {
-            providers = p
+            if p != providers { providers = p }
             // /proxies 不含節點來源裡的節點；把它們（含延遲紀錄）合併進來
             var map: [String: String] = [:]
             for (k, v) in p where v.isUserProvider {
@@ -309,7 +307,8 @@ final class AppState: ObservableObject {
             }
             nodeProvider = map
         }
-        proxies = merged
+        // 內容沒變就不要觸發畫面重畫
+        if merged != proxies { proxies = merged }
     }
 
     // MARK: - 節點與策略組
@@ -448,7 +447,7 @@ final class AppState: ObservableObject {
             // 設定檔：內嵌節點＋它自己的節點來源
             let ours = Set(store.subscriptions.map(\.providerName) + [ConfigBuilder.localProvider, "default"])
             let fromProviders = providers.values.filter { !ours.contains($0.name) && $0.isUserProvider }.reduce(0) { $0 + ($1.proxies?.count ?? 0) }
-            let inline = (try? String(contentsOf: ConfigBuilder.subFile(s, workDir: workDir), encoding: .utf8)).map { ProfileText($0).inlineProxyCount } ?? 0
+            let inline = summary(s)?.inline ?? 0
             return inline + fromProviders
         }
         return providers[s.providerName]?.proxies?.count
@@ -461,16 +460,24 @@ final class AppState: ObservableObject {
         return SubInfo(Upload: s.upload, Download: s.download, Total: t, Expire: s.expire)
     }
 
-    /// 訂閱設定檔的策略組名稱
-    func profileGroups(_ s: Subscription) -> [String] {
-        guard let t = try? String(contentsOf: ConfigBuilder.subFile(s, workDir: workDir), encoding: .utf8) else { return [] }
-        return ProfileText(t).groupNames()
+    private struct ProfileSummary { let stamp: Double; let groups: [String]; let rules: [String]; let inline: Int }
+    private var profileCache: [UUID: ProfileSummary] = [:]
+
+    /// 解析過的訂閱檔摘要；訂閱更新（updatedAt 變了）才重新讀檔，避免畫面每次重畫都解析
+    private func summary(_ s: Subscription) -> ProfileSummary? {
+        let stamp = s.updatedAt ?? 0
+        if let c = profileCache[s.id], c.stamp == stamp { return c }
+        guard let t = try? String(contentsOf: ConfigBuilder.subFile(s, workDir: workDir), encoding: .utf8) else { return nil }
+        let p = ProfileText(t)
+        let c = ProfileSummary(stamp: stamp, groups: p.groupNames(), rules: p.rules(), inline: p.inlineProxyCount)
+        profileCache[s.id] = c
+        return c
     }
 
-    func profileRules(_ s: Subscription) -> [String] {
-        guard let t = try? String(contentsOf: ConfigBuilder.subFile(s, workDir: workDir), encoding: .utf8) else { return [] }
-        return ProfileText(t).rules()
-    }
+    /// 訂閱設定檔的策略組名稱
+    func profileGroups(_ s: Subscription) -> [String] { summary(s)?.groups ?? [] }
+
+    func profileRules(_ s: Subscription) -> [String] { summary(s)?.rules ?? [] }
 
     private func refreshSubStatuses() {
         for i in store.subscriptions.indices where store.subscriptions[i].enabled && store.subscriptions[i].statusOK == nil {

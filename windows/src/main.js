@@ -62,12 +62,13 @@ saveStore();
 // ---------- 執行狀態 ----------
 const S = {
   coreReady: false, coreVersion: '', coreError: null, systemProxyOn: false, connectedSince: null,
-  busy: false, proxies: {}, providers: {}, connections: [], activeCount: 0, down: 0, up: 0,
-  history: [], pausedConnections: false, testingDelay: false, updatingSubs: [], toast: null,
+  busy: false, proxies: {}, providers: {}, pausedConnections: false, testingDelay: false, updatingSubs: [], toast: null,
   mainGroup: PROXY_GROUP, profileId: null, currentSSID: null,
   isAdmin: false, tunActive: false, appUpdate: null, coreUpdate: null, checking: false, coreUpdating: false,
 };
 let connHistory = {};          // id → [{t, down, up}]
+// 每秒變動的資料獨立傳給畫面（channel 'live'），避免整包狀態每秒重送、整頁重畫
+const L = { down: 0, up: 0, history: [], connections: [], activeCount: 0 };
 let lastTotals = null;
 let lastConnBytes = {};
 let watchConn = null;          // 連線頁正在看的那條
@@ -87,11 +88,12 @@ function toast(msg) {
 function snapshot() {
   return {
     ...S, store, platform: process.platform, appVersion: app.getVersion(), workDir,
-    connHistory: watchConn ? (connHistory[watchConn] || []) : [],
     subCounts: Object.fromEntries(store.subscriptions.map((x) => [x.id, subNodeCount(x)])),
   };
 }
+function liveSnapshot() { return { ...L, connHistory: watchConn ? (connHistory[watchConn] || []) : [] }; }
 function push() { if (win && !win.isDestroyed()) win.webContents.send('state', snapshot()); updateTray(); }
+function pushLive() { if (win && !win.isDestroyed() && win.isVisible()) win.webContents.send('live', liveSnapshot()); }
 
 // ---------- mihomo API ----------
 async function api(p, { method = 'GET', body, query, timeout = 10000 } = {}) {
@@ -227,6 +229,8 @@ async function disconnect() {
 }
 
 // ---------- 定時更新 ----------
+let lastProxySig = '';
+/** 回傳 true 表示節點資料有變（需要通知畫面） */
 async function refreshProxies() {
   if (!S.coreReady) return;
   let merged;
@@ -240,7 +244,11 @@ async function refreshProxies() {
       for (const x of p.proxies || []) { nodeProvider[x.name] = k; if (!merged[x.name]) merged[x.name] = x; }
     }
   } catch {}
+  const sig = JSON.stringify([merged, S.providers]);
+  if (sig === lastProxySig) return false;
+  lastProxySig = sig;
   S.proxies = merged;
+  return true;
 }
 
 function startedAt(c) { return c.start ? Date.parse(c.start) || 0 : 0; }
@@ -252,12 +260,12 @@ async function tick() {
   const now = Date.now();
   if (lastTotals) {
     const dt = Math.max(0.2, (now - lastTotals.t) / 1000);
-    S.down = Math.max(0, (r.downloadTotal - lastTotals.d) / dt);
-    S.up = Math.max(0, (r.uploadTotal - lastTotals.u) / dt);
+    L.down = Math.max(0, (r.downloadTotal - lastTotals.d) / dt);
+    L.up = Math.max(0, (r.uploadTotal - lastTotals.u) / dt);
   }
   lastTotals = { t: now, d: r.downloadTotal, u: r.uploadTotal };
-  S.history.push({ t: now, down: S.down, up: S.up });
-  if (S.history.length > 300) S.history.splice(0, S.history.length - 300);
+  L.history.push({ t: now, down: L.down, up: L.up });
+  if (L.history.length > 300) L.history.splice(0, L.history.length - 300);
 
   const conns = r.connections || [];
   const nh = {}, nb = {};
@@ -269,8 +277,9 @@ async function tick() {
     nh[c.id] = h; nb[c.id] = [c.download, c.upload];
   }
   connHistory = nh; lastConnBytes = nb;
-  S.activeCount = conns.length;
-  if (!S.pausedConnections) S.connections = conns.sort((a, b) => startedAt(b) - startedAt(a));
+  L.activeCount = conns.length;
+  // ISO 時間字串可直接比較，不必每次比較都解析
+  if (!S.pausedConnections) L.connections = conns.sort((a, b) => (b.start || '').localeCompare(a.start || ''));
 }
 
 function currentNode() {
@@ -283,13 +292,15 @@ async function loop() {
   let n = 0;
   for (;;) {
     await tick();
-    if (n % 5 === 0) await refreshProxies();
+    let changed = false;
+    if (n % 5 === 0) changed = await refreshProxies();
     if (n % 60 === 30) { const c = currentNode(); if (c && c !== 'DIRECT') delay(c).catch(() => {}); }
     if (n % 60 === 45) autoUpdateSubscriptions();
     if (n % 300 === 20) refreshEmptyRuleProviders();
     if (n % 5 === 2) checkSSID().catch(() => {});
     n++;
-    push();
+    pushLive();                  // 每秒只送流量與連線
+    if (changed) push();         // 節點資料有變才送完整狀態
     await new Promise((r) => setTimeout(r, 1000));
   }
 }
@@ -312,13 +323,16 @@ async function refreshEmptyRuleProviders() {
     api(`/providers/rules/${enc(n)}`, { method: 'PUT', timeout: 30000 }).catch(() => {})));
 }
 
+const inlineCache = {};
 function subNodeCount(sub) {
   const file = config.subFile(sub, workDir);
   if (!fs.existsSync(file)) return null;
   if (sub.id === S.profileId) {
     const ours = new Set(store.subscriptions.map(config.providerName).concat([LOCAL, 'default']));
     const fromProviders = Object.values(S.providers).filter((p) => !ours.has(p.name) && ['HTTP', 'File'].includes(p.vehicleType)).reduce((a, p) => a + (p.proxies?.length || 0), 0);
-    let inline = 0; try { inline = new ProfileText(fs.readFileSync(file, 'utf8')).inlineProxyCount; } catch {}
+    const key = sub.id + '|' + (sub.updatedAt || 0);
+    if (!(key in inlineCache)) { try { inlineCache[key] = new ProfileText(fs.readFileSync(file, 'utf8')).inlineProxyCount; } catch { inlineCache[key] = 0; } }
+    const inline = inlineCache[key];
     return inline + fromProviders;
   }
   return S.providers[config.providerName(sub)]?.proxies?.length ?? null;
@@ -758,8 +772,8 @@ const act = {
   async setDefaultPolicy(p) { store.settings.defaultPolicy = p; saveStore(); await applyConfig(); },
   async closeConnection(id) { try { await api(`/connections/${enc(id)}`, { method: 'DELETE' }); } catch {} },
   async closeAll() { try { await api('/connections', { method: 'DELETE' }); } catch {} toast('已中斷全部連線'); },
-  setPaused(v) { S.pausedConnections = v; push(); },
-  watchConnection(id) { watchConn = id; },
+  setPaused(v) { S.pausedConnections = v; push(); pushLive(); },
+  watchConnection(id) { watchConn = id; pushLive(); },
   copyTerminal() { clipboard.writeText(terminalCommand()); toast('已複製終端代理命令'); },
   copyText(t) { clipboard.writeText(String(t)); toast('已複製'); },
   async setSettings(patch) {

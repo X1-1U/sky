@@ -72,7 +72,18 @@ enum Flags {
     ]
     private static let codes = ["HK", "TW", "JP", "SG", "US", "KR", "UK", "GB", "DE", "FR", "CA", "AU", "RU", "IN", "TR", "NL", "TH", "VN", "MY", "PH", "MO"]
 
+    private static var codeCache: [String: String] = [:]
+    private static let none = "-"
+
+    /// 有快取：同一個名稱只判斷一次（節點卡片每次重畫都會呼叫）
     static func code(for name: String) -> String? {
+        if let c = codeCache[name] { return c == none ? nil : c }
+        let c = computeCode(name)
+        codeCache[name] = c ?? none
+        return c
+    }
+
+    private static func computeCode(_ name: String) -> String? {
         // 名稱開頭已經是國旗 emoji
         let scalars = Array(name.unicodeScalars.prefix(2))
         if scalars.count == 2, scalars.allSatisfy({ (0x1F1E6...0x1F1FF).contains($0.value) }) {
@@ -128,7 +139,17 @@ enum AppIcons {
         return img
     }
 
+    private static var nameCache: [String: String] = [:]
+
     static func name(_ c: Conn) -> String {
+        let key = (c.metadata.processPath ?? "") + "|" + (c.metadata.process ?? "")
+        if let n = nameCache[key] { return n }
+        let n = computeName(c)
+        nameCache[key] = n
+        return n
+    }
+
+    private static func computeName(_ c: Conn) -> String {
         if let b = bundleURL(c.metadata.processPath) {
             return FileManager.default.displayName(atPath: b.path).replacingOccurrences(of: ".app", with: "")
         }
