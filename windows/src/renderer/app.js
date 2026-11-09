@@ -215,7 +215,7 @@ function Overview({ s, go }) {
   const L = useLive();
   const node = currentNode(s);
   const d = node ? s.proxies[node]?.history?.slice(-1)[0]?.delay : null;
-  return html`<div class="page">
+  return html`<div class="page scroll">
     <div class="head"><h1 class="title">代理</h1><${Pill} on=${s.systemProxyOn} text=${s.systemProxyOn ? '已連線' : '未連線'} />
       ${s.tunActive && html`<${Tag} text="TUN" icon="shield" />`}
       <span class="spacer"></span>
@@ -239,11 +239,11 @@ function Overview({ s, go }) {
         <${Seg} tall options=${[['rule', '規則'], ['global', '全域'], ['direct', '直連']]} value=${s.store.settings.mode} onChange=${(m) => act('setMode', m)} />
       </div>
     </div>
-    <div class="card" style="padding:20px;flex:1;min-height:0;display:flex;flex-direction:column;gap:12px">
+    <div class="card" style="padding:20px;flex-shrink:0;display:flex;flex-direction:column;gap:12px">
       <h3>最近連線</h3>
       <div class="thead"><span class="c f">應用程式</span><span class="c f">目的地</span><span class="c" style="width:200px">策略</span><span class="c" style="width:130px">流量</span></div>
       ${L.connections.length === 0 ? html`<div class="empty">${s.coreReady ? '目前沒有連線' : '核心尚未啟動'}</div>` :
-        html`<div class="tbody">${L.connections.slice(0, 6).map((c) => html`<div class="tr" key=${c.id}>
+        html`<div>${L.connections.slice(0, 8).map((c) => html`<div class="tr" key=${c.id}>
           <span class="c f row" style="gap:14px"><${AppIcon} path=${c.metadata.processPath} />${appName(c)}</span>
           <span class="c f">${destination(c)}</span>
           <span class="c" style="width:200px">${policyLabel(c) === '代理' ? '規則代理' : policyLabel(c)}</span>

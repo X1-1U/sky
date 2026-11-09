@@ -5,6 +5,8 @@ struct OverviewView: View {
     @EnvironmentObject var live: LiveStats
 
     var body: some View {
+        // 內容比視窗高時可以上下捲動
+        ScrollView(.vertical) {
         VStack(alignment: .leading, spacing: 20) {
             HStack(spacing: 18) {
                 PageTitle(title: "代理")
@@ -78,7 +80,7 @@ struct OverviewView: View {
                         .foregroundColor(T.mute).font(.system(size: 15))
                         .frame(maxWidth: .infinity, minHeight: 60)
                 } else {
-                    ForEach(live.connections.prefix(4)) { c in
+                    ForEach(live.connections.prefix(8)) { c in
                         HStack(spacing: 0) {
                             HStack(spacing: 14) {
                                 Image(nsImage: AppIcons.icon(c.metadata.processPath)).resizable().frame(width: 30, height: 30)
@@ -97,10 +99,10 @@ struct OverviewView: View {
                 }
             }
             .card(20)
-            Spacer(minLength: 0)
         }
         .padding(.horizontal, 32)
         .padding(.top, 36)
         .padding(.bottom, 24)
+        }
     }
 }
