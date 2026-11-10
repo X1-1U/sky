@@ -106,9 +106,11 @@ function appName(c) {
   const m = p.match(/([^/\\]+)\.app[/\\]/);
   if (m) return m[1];
   if (c.metadata.process) return c.metadata.process.replace(/\.exe$/i, '');
+  if (c.metadata.type === 'Inner') return 'mihomo 核心';
   return '未知';
 }
-const destination = (c) => c.metadata.host || c.metadata.destinationIP || '—';
+// TUN 模式下 host 是空的，網域要從 sniffer 嗅探結果拿
+const destination = (c) => c.metadata.host || c.metadata.sniffHost || c.metadata.destinationIP || '—';
 const policyLabel = (c) => { const n = (c.chains || [])[0]; return n === 'DIRECT' ? '直連' : (n === 'REJECT' || n === 'REJECT-DROP') ? '拒絕' : '代理'; };
 
 // ---------- 圖表 ----------
@@ -574,6 +576,7 @@ function Connections({ s }) {
           <div class="hr"></div>
           <div>
             <${Info} k="目的地" v=${`${destination(d)}:${d.metadata.destinationPort || ''}`} />
+            ${d.metadata.destinationIP && d.metadata.destinationIP !== destination(d) && html`<${Info} k="IP 位址" v=${d.metadata.destinationIP} />`}
             <${Info} k="協定" v=${(d.metadata.network || '').toUpperCase()} />
             <div class="info"><span>節點</span><span class="row" style="gap:6px">${policyLabel(d) === '代理' && html`<${Flag} name=${(d.chains || [])[0] || ''} />`}${cleanName((d.chains || [])[0] || '—')}</span></div>
             <${Info} k="命中規則" v=${d.rule ? (d.rulePayload ? `${d.rule} · ${d.rulePayload}` : d.rule) : '—'} />

@@ -123,6 +123,9 @@ struct ConnectionsView: View {
                 Divider().overlay(T.line)
                 VStack(spacing: 10) {
                     InfoRow(label: "目的地", value: "\(c.destination):\(c.metadata.destinationPort ?? "")")
+                    if let ip = c.metadata.destinationIP, !ip.isEmpty, ip != c.destination {
+                        InfoRow(label: "IP 位址", value: ip)
+                    }
                     InfoRow(label: "協定", value: (c.metadata.network ?? "").uppercased())
                     HStack {
                         Text("節點").foregroundColor(T.text.opacity(0.9))

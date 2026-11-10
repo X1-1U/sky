@@ -203,6 +203,8 @@ struct ConnMeta: Decodable {
     let destinationPort: String?
     let process: String?
     let processPath: String?
+    /// TUN 模式下 host 是空的，網域要從 sniffer 嗅探結果拿
+    let sniffHost: String?
 }
 
 struct Conn: Decodable, Identifiable {
@@ -217,6 +219,7 @@ struct Conn: Decodable, Identifiable {
 
     var destination: String {
         if let h = metadata.host, !h.isEmpty { return h }
+        if let h = metadata.sniffHost, !h.isEmpty { return h }
         return metadata.destinationIP ?? "—"
     }
     var policyLabel: String {

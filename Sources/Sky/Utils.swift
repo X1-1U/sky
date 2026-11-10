@@ -154,6 +154,7 @@ enum AppIcons {
             return FileManager.default.displayName(atPath: b.path).replacingOccurrences(of: ".app", with: "")
         }
         if let p = c.metadata.process, !p.isEmpty { return p }
+        if c.metadata.type == "Inner" { return "mihomo 核心" }   // 核心自己的連線（下載規則集、訂閱等）
         return "未知"
     }
 
