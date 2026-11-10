@@ -806,6 +806,8 @@ ipcMain.handle('snapshot', () => snapshot());
 
 // ---------- 生命週期 ----------
 app.on('second-instance', showWindow);
+// macOS 點 Dock 圖示、或重新開啟 App 時顯示主視窗
+app.on('activate', showWindow);
 
 app.whenReady().then(async () => {
   app.setAppUserModelId('com.onsunday.sky');

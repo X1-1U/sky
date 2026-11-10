@@ -23,7 +23,7 @@ struct SkyApp: App {
                 .environmentObject(state.live)
                 .preferredColorScheme(.dark)
         } label: {
-            Image(systemName: state.systemProxyOn ? "paperplane.fill" : "paperplane")
+            MenuBarLabel(on: state.systemProxyOn)
         }
         .menuBarExtraStyle(.window)
     }
@@ -36,8 +36,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// 點 Dock 圖示：沒有可見視窗時重新打開主視窗
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { MainActor.assumeIsolated { AppState.shared.showMainWindow() } }
+        return true
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { AppState.shared.shutdown() }
+    }
+}
+
+/// 選單列圖示。它一直存在，所以在這裡保存「打開主視窗」的方法，
+/// 主視窗關掉後點 Dock 圖示也能重新打開
+struct MenuBarLabel: View {
+    let on: Bool
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Image(systemName: on ? "paperplane.fill" : "paperplane")
+            .onAppear {
+                let open = openWindow
+                AppState.shared.openMainWindow = { open(id: "main") }
+            }
     }
 }
 

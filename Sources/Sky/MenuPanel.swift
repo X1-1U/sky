@@ -82,8 +82,8 @@ struct MenuPanel: View {
             Divider().overlay(T.line)
             VStack(spacing: 0) {
                 menuButton("打開主視窗", "⌘O") {
-                    openWindow(id: "main")
-                    NSApp.activate(ignoringOtherApps: true)
+                    if s.openMainWindow == nil { let o = openWindow; s.openMainWindow = { o(id: "main") } }
+                    s.showMainWindow()
                 }
                 .keyboardShortcut("o")
                 menuButton("複製終端代理命令", "⌘C") { s.copyTerminalCommand() }

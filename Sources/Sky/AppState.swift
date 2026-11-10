@@ -50,6 +50,9 @@ final class AppState: ObservableObject {
     @Published var testingDelay = false
     @Published var updatingSubs: Set<UUID> = []
     @Published var toast: String?
+    /// 由選單列圖示設定，用來在主視窗關掉後重新打開它
+    var openMainWindow: (() -> Void)?
+
     /// 每秒更新的資料放這裡，避免整個畫面每秒重畫
     let live = LiveStats()
     @Published var tunActive = false
@@ -100,6 +103,20 @@ final class AppState: ObservableObject {
         toast = s
         toastTask?.cancel()
         toastTask = Task { try? await Task.sleep(nanoseconds: 2_500_000_000); if !Task.isCancelled { toast = nil } }
+    }
+
+    /// 顯示主視窗：還在（只是被隱藏或縮到 Dock）就拿到最前面，已經關掉就重新打開
+    func showMainWindow() {
+        let main = NSApp.windows.first { w in
+            (w.identifier?.rawValue.hasPrefix("main") ?? false) && w.canBecomeMain
+        }
+        if let main {
+            if main.isMiniaturized { main.deminiaturize(nil) }
+            main.makeKeyAndOrderFront(nil)
+        } else {
+            openMainWindow?()
+        }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: - 啟動 / 結束
