@@ -180,6 +180,7 @@ final class AppState: ObservableObject {
             return
         }
         tunActive = wantTun
+        updateConnectedSince()
         try? await api.select(group: "GLOBAL", name: mainGroup)
         lastTotals = nil
         await refreshProxies()
@@ -233,11 +234,38 @@ final class AppState: ObservableObject {
     func disconnect() async {
         await Task.detached { SystemProxy.disable() }.value
         systemProxyOn = false
-        connectedSince = nil
+        updateConnectedSince()
     }
 
+    /// 系統代理或 TUN 任一開著就算已連線
+    var isConnected: Bool { systemProxyOn || tunActive }
+
+    /// 目前用哪種方式連線
+    var connectionMode: String? {
+        switch (systemProxyOn, tunActive) {
+        case (true, true): return "系統代理＋TUN"
+        case (false, true): return "TUN"
+        case (true, false): return "系統代理"
+        default: return nil
+        }
+    }
+
+    var connectionLabel: String { connectionMode.map { "已連線 · \($0)" } ?? "未連線" }
+
+    private func updateConnectedSince() {
+        if isConnected { if connectedSince == nil { connectedSince = Date() } } else { connectedSince = nil }
+    }
+
+    /// 已連線就全部中斷（系統代理與 TUN），否則開系統代理
     func toggleConnection() {
-        Task { systemProxyOn ? await disconnect() : await connect() }
+        Task {
+            if isConnected {
+                if systemProxyOn { await disconnect() }
+                if store.settings.tun { await setTun(false) }
+            } else {
+                await connect()
+            }
+        }
     }
 
     func setMode(_ m: String) {

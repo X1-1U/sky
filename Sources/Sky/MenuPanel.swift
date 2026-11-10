@@ -15,11 +15,11 @@ struct MenuPanel: View {
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Sky").font(.system(size: 16, weight: .semibold))
-                    Text(!s.coreReady ? "核心未執行" : (s.systemProxyOn ? "系統代理已開啟" : "未連線"))
+                    Text(!s.coreReady ? "核心未執行" : s.connectionLabel)
                         .font(.system(size: 12)).foregroundColor(T.mute)
                 }
                 Spacer()
-                SkySwitch(isOn: Binding(get: { s.systemProxyOn }, set: { _ in s.toggleConnection() }), label: "系統代理")
+                SkySwitch(isOn: Binding(get: { s.isConnected }, set: { _ in s.toggleConnection() }), label: "系統代理")
                     .disabled(!s.coreReady)
             }
 

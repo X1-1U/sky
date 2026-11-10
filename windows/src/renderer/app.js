@@ -211,6 +211,10 @@ function useLive() {
   return l;
 }
 
+// 系統代理或 TUN 任一開著就算已連線
+const isConn = (s) => s.systemProxyOn || s.tunActive;
+const connLabel = (s) => !isConn(s) ? '未連線' : '已連線 · ' + [s.systemProxyOn && '系統代理', s.tunActive && 'TUN'].filter(Boolean).join('＋');
+
 // ================= 頁面 =================
 
 function Overview({ s, go }) {
@@ -218,10 +222,9 @@ function Overview({ s, go }) {
   const node = currentNode(s);
   const d = node ? s.proxies[node]?.history?.slice(-1)[0]?.delay : null;
   return html`<div class="page scroll">
-    <div class="head"><h1 class="title">代理</h1><${Pill} on=${s.systemProxyOn} text=${s.systemProxyOn ? '已連線' : '未連線'} />
-      ${s.tunActive && html`<${Tag} text="TUN" icon="shield" />`}
+    <div class="head"><h1 class="title">代理</h1><${Pill} on=${isConn(s)} text=${connLabel(s)} />
       <span class="spacer"></span>
-      <button class="btn primary" disabled=${!s.coreReady} onClick=${() => act('toggleConnection')}>${s.systemProxyOn ? '中斷連線' : '連線'}</button></div>
+      <button class="btn primary" disabled=${!s.coreReady} onClick=${() => act('toggleConnection')}>${isConn(s) ? '中斷連線' : '連線'}</button></div>
     <div class="stats">
       <${Stat} icon="swap" k="延遲" v=${fmtDelay(d)} />
       <${Stat} icon="down" k="下載" v=${fmtSpeed(L.down)} accent />
@@ -284,7 +287,7 @@ function Nodes({ s, go }) {
   const allOpen = groups.length > 0 && groups.every((g) => open.has(g));
 
   return html`<div class="page">
-    <div class="head"><div><div class="row" style="gap:18px"><h1 class="title">節點</h1><${Pill} on=${s.systemProxyOn} text=${s.systemProxyOn ? '已連線' : '未連線'} /></div>
+    <div class="head"><div><div class="row" style="gap:18px"><h1 class="title">節點</h1><${Pill} on=${isConn(s)} text=${connLabel(s)} /></div>
       <div class="subtitle" style="margin-top:6px">${prof ? `使用訂閱「${prof.name}」的 ${groups.length} 個策略組` : '選擇連線節點'}</div></div>
       <span class="spacer"></span>
       <button class="btn" onClick=${() => setOpen(allOpen ? new Set() : new Set(groups))}>${allOpen ? '全部收合' : '全部展開'}</button>

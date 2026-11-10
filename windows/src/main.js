@@ -175,6 +175,7 @@ async function startCore() {
   }
   if (!S.coreReady) { S.coreError = '核心沒有回應：' + tailLog(3); push(); return; }
   S.tunActive = useTun();
+  if (S.tunActive) { if (!S.connectedSince) S.connectedSince = Date.now(); } else if (!S.systemProxyOn) S.connectedSince = null;
   try { await api(`/proxies/GLOBAL`, { method: 'PUT', body: { name: S.mainGroup } }); } catch {}
   lastTotals = null;
   setProxyForApp(true);
@@ -224,7 +225,7 @@ async function connect() {
 }
 async function disconnect() {
   await sysproxy.disable();
-  S.systemProxyOn = false; S.connectedSince = null;
+  S.systemProxyOn = false; if (!S.tunActive) S.connectedSince = null;
   push();
 }
 
@@ -654,7 +655,7 @@ function updateTray() {
   const g = S.proxies[S.mainGroup];
   const nodeItems = (g?.all || []).slice(0, 60).map((n) => ({ label: n, type: 'radio', checked: n === g.now, click: () => act.select(n, S.mainGroup) }));
   const menu = Menu.buildFromTemplate([
-    { label: S.coreReady ? (S.systemProxyOn ? 'Sky · 已連線' : 'Sky · 未連線') : 'Sky · 核心未執行', enabled: false },
+    { label: S.coreReady ? ((S.systemProxyOn || S.tunActive) ? `Sky · 已連線（${[S.systemProxyOn && '系統代理', S.tunActive && 'TUN'].filter(Boolean).join('＋')}）` : 'Sky · 未連線') : 'Sky · 核心未執行', enabled: false },
     { type: 'separator' },
     { label: '系統代理', type: 'checkbox', checked: S.systemProxyOn, enabled: S.coreReady, click: () => act.toggleConnection() },
     { label: 'TUN 模式', type: 'checkbox', checked: !!store.settings.tun, enabled: S.coreReady, click: (i) => setTun(i.checked) },
@@ -667,7 +668,7 @@ function updateTray() {
     { label: '結束 Sky', click: () => app.quit() },
   ]);
   tray.setContextMenu(menu);
-  tray.setToolTip(S.systemProxyOn ? 'Sky：已連線' : 'Sky：未連線');
+  tray.setToolTip((S.systemProxyOn || S.tunActive) ? 'Sky：已連線' : 'Sky：未連線');
 }
 
 function createTray() {
@@ -686,7 +687,13 @@ const terminalCommand = () => {
 };
 
 const act = {
-  async toggleConnection() { S.systemProxyOn ? await disconnect() : await connect(); },
+  async toggleConnection() {
+    // 系統代理或 TUN 任一開著就算已連線：已連線就全部中斷，否則開系統代理
+    if (S.systemProxyOn || S.tunActive) {
+      if (S.systemProxyOn) await disconnect();
+      if (store.settings.tun) await setTun(false);
+    } else await connect();
+  },
   async setMode(m) {
     store.settings.mode = m; saveStore(); push();
     try { await api('/configs', { method: 'PATCH', body: { mode: m } }); await api('/connections', { method: 'DELETE' }); } catch {}

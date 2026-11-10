@@ -47,7 +47,7 @@ struct NodesView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 18) {
                         PageTitle(title: "節點")
-                        StatusPill(text: s.systemProxyOn ? "已連線" : "未連線", on: s.systemProxyOn)
+                        StatusPill(text: s.connectionLabel, on: s.isConnected)
                     }
                     Text(s.profileSub.map { "使用訂閱「\($0.name)」的 \(groups.count) 個策略組" } ?? "選擇連線節點")
                         .font(.system(size: 17)).foregroundColor(T.text.opacity(0.8))

@@ -23,7 +23,7 @@ struct SkyApp: App {
                 .environmentObject(state.live)
                 .preferredColorScheme(.dark)
         } label: {
-            MenuBarLabel(on: state.systemProxyOn)
+            MenuBarLabel(on: state.isConnected)
         }
         .menuBarExtraStyle(.window)
     }

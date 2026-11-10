@@ -10,10 +10,9 @@ struct OverviewView: View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(spacing: 18) {
                 PageTitle(title: "代理")
-                StatusPill(text: s.systemProxyOn ? "已連線" : "未連線", on: s.systemProxyOn)
-                if s.tunActive { Tag(text: "TUN", kind: .green, icon: "shield") }
+                StatusPill(text: s.connectionLabel, on: s.isConnected)
                 Spacer()
-                Button(s.systemProxyOn ? "中斷連線" : "連線") { s.toggleConnection() }
+                Button(s.isConnected ? "中斷連線" : "連線") { s.toggleConnection() }
                     .buttonStyle(PrimaryButton())
                     .disabled(!s.coreReady)
             }
