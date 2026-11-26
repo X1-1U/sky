@@ -94,6 +94,8 @@ struct MenuPanel: View {
         }
         .padding(16)
         .frame(width: 340)
+        .onAppear { s.menuPanelOpen = true }
+        .onDisappear { s.menuPanelOpen = false }
         .background(T.sidebar)
     }
 

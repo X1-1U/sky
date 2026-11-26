@@ -17,6 +17,8 @@ enum ConfigBuilder {
         let mainGroup: String
         let autoGroup: String
         let profile: Subscription?
+        /// Sky 自己加的節點來源（背景服務模式下更新訂閱後要叫核心重新下載）
+        var providerNames: [String] = []
     }
 
     static func q(_ s: String) -> String {
@@ -70,6 +72,11 @@ enum ConfigBuilder {
           store-selected: true
 
         """
+        // 開放區域網路時一定要有帳號密碼，否則同網路的人都能免費用你的代理；本機程式免密碼
+        if st.allowLan {
+            y += "authentication:\n  - \(q(st.lanUser + ":" + st.lanPassword))\n"
+            y += "skip-auth-prefixes:\n  - 127.0.0.1/8\n  - ::1/128\n"
+        }
         if tun {
             y += "tun:\n  enable: true\n  stack: mixed\n  auto-route: true\n  auto-detect-interface: true\n  dns-hijack: [\"any:53\"]\n"
         }
@@ -97,7 +104,8 @@ enum ConfigBuilder {
         return true
     }
 
-    static func build(_ store: Store, workDir: URL, tun: Bool = false) -> Built {
+    /// fileServer：背景服務模式時，本機節點與其他訂閱改由 App 的本機伺服器提供（root 核心不讀使用者資料夾）
+    static func build(_ store: Store, workDir: URL, tun: Bool = false, fileServer: String? = nil) -> Built {
         let st = store.settings
         let fm = FileManager.default
         let hasLocal = writeLocal(store, workDir: workDir)
@@ -110,6 +118,9 @@ enum ConfigBuilder {
         var providerNames = providerSubs.map(\.providerName)
         if hasLocal { providerNames.append(localProvider) }
         func providerEntry(_ name: String) -> String {
+            if let base = fileServer {
+                return "\(q(name)): {type: http, url: \(q(base + "/" + name)), path: ./providers/\(name).yaml, interval: 0, proxy: DIRECT, \(health(st))}"
+            }
             let path = name == localProvider ? "./providers/local.txt" : "./subs/\(name.replacingOccurrences(of: "sub-", with: "")).yaml"
             return "\(q(name)): {type: file, path: \(path), \(health(st))}"
         }
@@ -136,7 +147,7 @@ enum ConfigBuilder {
             var y = "# 由 Sky 產生：以訂閱「\(profile.name)」為底稿，Sky 蓋掉埠口、控制 API、TUN 等設定\n"
             y += p.text + "\n\n# ---- Sky ----\n" + overrides(st, tun: tun)
             if !p.has("dns") { y += dnsBlock(tun: tun) }
-            return Built(yaml: y, mainGroup: main, autoGroup: auto, profile: profile)
+            return Built(yaml: y, mainGroup: main, autoGroup: auto, profile: profile, providerNames: providerNames)
         }
 
         // 一般模式
@@ -159,6 +170,6 @@ enum ConfigBuilder {
         }
         y += "rules:\n" + ruleLines(store, target: target).map { "  - \($0)\n" }.joined()
         y += "  - \(q("MATCH,\(target(st.defaultPolicy))"))\n"
-        return Built(yaml: y, mainGroup: proxyGroup, autoGroup: providerNames.isEmpty ? proxyGroup : autoGroup, profile: nil)
+        return Built(yaml: y, mainGroup: proxyGroup, autoGroup: providerNames.isEmpty ? proxyGroup : autoGroup, profile: nil, providerNames: providerNames)
     }
 }

@@ -50,6 +50,9 @@ final class AppState: ObservableObject {
     @Published var testingDelay = false
     @Published var updatingSubs: Set<UUID> = []
     @Published var toast: String?
+    let fileServer = LocalFileServer()
+    private var lastBuilt: ConfigBuilder.Built?
+
     /// 由選單列圖示設定，用來在主視窗關掉後重新打開它
     var openMainWindow: (() -> Void)?
 
@@ -125,7 +128,14 @@ final class AppState: ObservableObject {
         copyGeoData()
         migrateSubscriptions()
         core.killStale()
+        let dir = workDir
+        fileServer.resolver = { name in ConfigBuilder.providerFile(name, workDir: dir) }
+        // 用 SKY_HOME 測試時不跳提示，避免卡住
+        if core.hasLegacySetuid && !core.isDaemonInstalled && ProcessInfo.processInfo.environment["SKY_HOME"] == nil {
+            promptLegacyUpgrade()
+        }
         await startCore()
+        startWatchdog()
         startLoop()
         autoUpdateSubscriptions()
         if store.settings.ssidEnabled { enableSSID(true) }
@@ -151,34 +161,89 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// 開了 TUN 而且核心有授權，才真的寫進設定檔
-    var wantTun: Bool { store.settings.tun && core.isTunAuthorized }
+    // MARK: - TUN 背景服務
 
-    private func writeConfig() -> (Bool, String) {
-        let built = ConfigBuilder.build(store, workDir: workDir, tun: wantTun)
+    /// TUN 背景服務已安裝：核心由系統以 root 執行，App 透過 API 推送設定
+    var daemonMode: Bool { core.isDaemonInstalled }
+
+    /// 開了 TUN 而且背景服務已安裝，才真的寫進設定檔
+    var wantTun: Bool { store.settings.tun && daemonMode }
+
+    /// 舊版 1.0.x 的 setuid 授權有提權風險，啟動時請使用者升級或移除
+    private func promptLegacyUpgrade() {
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = "需要升級 TUN 授權"
+        a.informativeText = "舊版 Sky 用「setuid」方式授權 mihomo 核心，電腦上任何程式都能利用它免密碼取得最高權限。新版改用系統背景服務，比較安全。\n\n升級或移除都需要輸入一次管理員密碼。"
+        a.addButton(withTitle: "立即升級")
+        a.addButton(withTitle: "移除舊授權")
+        a.addButton(withTitle: "稍後")
+        switch a.runModal() {
+        case .alertFirstButtonReturn:
+            let r = core.installDaemon(controllerPort: store.settings.controllerPort, secret: store.settings.secret)
+            showToast(r.ok ? "已升級為 TUN 背景服務" : "升級失敗：\(r.message)")
+        case .alertSecondButtonReturn:
+            let r = core.uninstallDaemon()
+            store.settings.tun = false
+            showToast(r.ok ? "已移除舊授權" : "移除失敗：\(r.message)")
+        default:
+            showToast("舊授權仍在，TUN 暫時停用；可以到「設定」升級")
+        }
+    }
+
+    /// 產生設定檔並在背景執行緒檢查（mihomo -t 約 0.5 秒，放主執行緒會讓畫面凍結）
+    private func writeConfig() async -> (Bool, String) {
+        if daemonMode { fileServer.start() }
+        let built = ConfigBuilder.build(store, workDir: workDir, tun: wantTun,
+                                        fileServer: daemonMode ? fileServer.baseURL : nil)
         mainGroup = built.mainGroup
-        let yaml = built.yaml
-        do { try yaml.write(to: core.configURL, atomically: true, encoding: .utf8) } catch {
+        lastBuilt = built
+        do { try built.yaml.write(to: core.configURL, atomically: true, encoding: .utf8) } catch {
             return (false, "寫入設定檔失敗：\(error.localizedDescription)")
         }
         let core = self.core
-        return core.test()
+        return await Task.detached { core.test() }.value
+    }
+
+    private func waitForCore(seconds: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if let v = try? await api.version() { coreVersion = v; return true }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        return false
+    }
+
+    /// 背景服務模式：把設定內容推給 root 核心，並請它重新下載 Sky 提供的節點來源
+    private func pushConfig() async throws {
+        guard let b = lastBuilt else { return }
+        try await api.reload(payload: b.yaml)
+        for name in b.providerNames { try? await api.updateProvider(name) }
     }
 
     func startCore() async {
         coreReady = false
         coreError = nil
-        let (ok, msg) = writeConfig()
+        let (ok, msg) = await writeConfig()
         guard ok else { coreError = "設定檔有誤：\(msg)"; return }
-        do { try core.start() } catch { coreError = "無法啟動核心：\(error.localizedDescription)"; return }
-        for _ in 0..<60 {
-            if let v = try? await api.version() { coreVersion = v; coreReady = true; break }
-            try? await Task.sleep(nanoseconds: 100_000_000)
+        if daemonMode {
+            core.stop()   // 一般模式的子行程如果還在，會跟背景服務搶埠口
+            guard await waitForCore(seconds: 8) else {
+                coreError = "TUN 背景服務沒有回應，可以到「設定」重新安裝或移除：" + core.tailLog(3)
+                return
+            }
+            do { try await pushConfig() } catch {
+                coreError = "推送設定到背景服務失敗：\(error.localizedDescription)"
+                return
+            }
+        } else {
+            do { try core.start() } catch { coreError = "無法啟動核心：\(error.localizedDescription)"; return }
+            guard await waitForCore(seconds: 6) else {
+                coreError = "核心沒有回應：" + core.tailLog(3)
+                return
+            }
         }
-        guard coreReady else {
-            coreError = "核心沒有回應：" + core.tailLog(3)
-            return
-        }
+        coreReady = true
         tunActive = wantTun
         updateConnectedSince()
         try? await api.select(group: "GLOBAL", name: mainGroup)
@@ -189,7 +254,12 @@ final class AppState: ObservableObject {
 
     func restartCore() async {
         busy = true
-        core.stop()
+        if daemonMode {
+            _ = try? await api.request("/restart", method: "POST")
+            try? await Task.sleep(nanoseconds: 800_000_000)
+        } else {
+            core.stop()
+        }
         await startCore()
         busy = false
         if systemProxyOn { await connect() }
@@ -200,17 +270,17 @@ final class AppState: ObservableObject {
     func applyConfig() async {
         busy = true
         defer { busy = false }
-        guard coreReady, core.isRunning else { await startCore(); return }
-        // TUN 開關變了要整個重啟核心
-        if tunActive != wantTun { core.stop(); await startCore(); return }
-        let (ok, msg) = writeConfig()
+        guard coreReady, daemonMode || core.isRunning else { await startCore(); return }
+        let (ok, msg) = await writeConfig()
         guard ok else { showToast("設定檔有誤"); coreError = "設定檔有誤：\(msg)"; return }
         do {
-            try await api.reload(path: core.configURL.path)
+            if daemonMode { try await pushConfig() } else { try await api.reload(path: core.configURL.path) }
             coreError = nil
         } catch {
             coreError = "重新載入失敗：\(error.localizedDescription)"
         }
+        tunActive = wantTun
+        updateConnectedSince()
         try? await api.select(group: "GLOBAL", name: mainGroup)
         await refreshProxies()
         refreshSubStatuses()
@@ -219,7 +289,52 @@ final class AppState: ObservableObject {
     func shutdown() {
         loop?.cancel()
         if systemProxyOn { SystemProxy.disable() }
+        if daemonMode {
+            // 背景服務的核心會繼續存在；結束 App 時把 TUN 關掉，避免 App 不在了流量還被接管
+            api.patchSync(["tun": ["enable": false]])
+        }
         core.stop()
+    }
+
+    // MARK: - 守門程式：App 異常結束時關掉系統代理
+
+    private var watchdog: Process?
+
+    /// 背景 shell：等 App 結束後，如果系統代理還指著 Sky 的埠口、而且那個埠口已經沒有核心在聽，就把系統代理關掉，
+    /// 避免 App 當掉或被強制結束後整台電腦斷網。（TUN 背景服務模式下核心還活著，就不會關。）
+    func startWatchdog() {
+        watchdog?.terminate()
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let port = store.settings.mixedPort
+        let script = """
+        while kill -0 \(pid) 2>/dev/null; do sleep 3; done
+        nc -z 127.0.0.1 \(port) 2>/dev/null && exit 0
+        /usr/sbin/networksetup -listallnetworkservices | tail -n +2 | grep -v '^\\*' | while IFS= read -r s; do
+          info="$(/usr/sbin/networksetup -getwebproxy "$s")"
+          if echo "$info" | grep -q 'Enabled: Yes' && echo "$info" | grep -q 'Port: \(port)$'; then
+            /usr/sbin/networksetup -setwebproxystate "$s" off
+            /usr/sbin/networksetup -setsecurewebproxystate "$s" off
+            /usr/sbin/networksetup -setsocksfirewallproxystate "$s" off
+          fi
+        done
+        """
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", script]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        watchdog = p
+    }
+
+    /// 設定頁的「重設系統代理」：不管目前狀態，直接把所有網路服務的代理關掉
+    func resetSystemProxy() {
+        Task {
+            await Task.detached { SystemProxy.disable() }.value
+            systemProxyOn = false
+            updateConnectedSince()
+            showToast("已關閉所有網路服務的系統代理")
+        }
     }
 
     // MARK: - 連線（系統代理）
@@ -278,28 +393,59 @@ final class AppState: ObservableObject {
 
     // MARK: - 定時更新
 
+    /// 主視窗或選單列面板正在顯示（看不到時把輪詢放慢，省電）
+    var menuPanelOpen = false
+    private var uiVisible: Bool {
+        menuPanelOpen || NSApp.windows.contains { w in
+            (w.identifier?.rawValue.hasPrefix("main") ?? false) && w.isVisible && w.occlusionState.contains(.visible)
+        }
+    }
+
     private func startLoop() {
         loop?.cancel()
         loop = Task { [weak self] in
-            var n = 0
+            let start = Date()
+            var due: [String: Date] = [
+                "proxies": start, "nodeTest": start + 30, "subs": start + 45,
+                "rules": start + 20, "ssid": start + 2, "daemon": start + 5, "log": start + 60,
+            ]
+            func run(_ key: String, every: TimeInterval) -> Bool {
+                guard Date() >= (due[key] ?? .distantPast) else { return false }
+                due[key] = Date() + every
+                return true
+            }
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.tick()
-                if n % 5 == 0 { await self.refreshProxies() }
-                if n % 60 == 30 { await self.testCurrentNode() }
-                if n % 60 == 45 { self.autoUpdateSubscriptions() }
-                if n % 300 == 20 { await self.refreshEmptyRuleProviders() }
-                if n % 5 == 2 { await self.checkSSID() }
-                n += 1
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if run("proxies", every: 5) { await self.refreshProxies() }
+                if run("nodeTest", every: 60) { await self.testCurrentNode() }
+                if run("subs", every: 60) { self.autoUpdateSubscriptions() }
+                if run("rules", every: 300) { await self.refreshEmptyRuleProviders() }
+                if run("ssid", every: 5) { await self.checkSSID() }
+                if run("daemon", every: 5) { await self.checkDaemon() }
+                if run("log", every: 300), self.daemonMode { self.core.trimDaemonLog() }
+                // 畫面看得到每秒更新；看不到時每 5 秒一次
+                let interval: UInt64 = self.uiVisible ? 1 : 5
+                try? await Task.sleep(nanoseconds: interval * 1_000_000_000)
             }
         }
+    }
+
+    /// 背景服務模式：launchd 重啟核心後設定會回到啟動用的精簡版（沒有代理埠），偵測到就重新推送
+    private func checkDaemon() async {
+        guard daemonMode, !busy else { return }
+        guard let cfg = try? await api.configs() else {
+            if coreReady { coreReady = false; coreError = "TUN 背景服務沒有回應，等待它重新啟動…" }
+            return
+        }
+        let port = cfg["mixed-port"] as? Int ?? 0
+        if !coreReady || port != store.settings.mixedPort { await startCore() }
     }
 
     private func tick() async {
         guard coreReady else { return }
         guard let r = try? await api.connections() else {
-            if !core.isRunning { coreReady = false; coreError = "核心已停止：" + core.tailLog(3) }
+            if !daemonMode && !core.isRunning { coreReady = false; coreError = "核心已停止：" + core.tailLog(3) }
             return
         }
         let now = Date()
@@ -402,7 +548,7 @@ final class AppState: ObservableObject {
         if let prof = ConfigBuilder.profileSub(store, workDir: workDir) {
             if !node.provider.isEmpty {
                 // 訂閱自己內嵌的節點來源，mihomo 會存在設定檔指定的 path
-                let guess = workDir.appendingPathComponent("proxies/\(node.provider).yaml")
+                let guess = core.dataDir.appendingPathComponent("proxies/\(node.provider).yaml")
                 if FileManager.default.fileExists(atPath: guess.path) { return guess }
             }
             return ConfigBuilder.subFile(prof, workDir: workDir)

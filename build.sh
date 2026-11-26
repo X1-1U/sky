@@ -3,19 +3,14 @@
 set -e
 cd "$(dirname "$0")"
 
-# 1. 核心：vendor/mihomo 不存在就從 GitHub 下載（失敗時改用 Clash Verge 內附的那份）
-if [ ! -x vendor/mihomo ]; then
-  mkdir -p vendor
-  TAG=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)
-  if [ -n "$TAG" ] && curl -fsL -o vendor/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/$TAG/mihomo-darwin-arm64-$TAG.gz"; then
-    gunzip -f vendor/mihomo.gz
-  elif [ -x "/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo" ]; then
-    cp "/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo" vendor/mihomo
-  else
-    echo "找不到 mihomo 核心，請手動放到 vendor/mihomo"; exit 1
-  fi
-  chmod +x vendor/mihomo
+# 1. 核心：只用 mihomo 官方 Release，並驗證 SHA-256（tools/fetch-mihomo.sh）
+if [ ! -x vendor/mihomo ] || [ ! -f vendor/mihomo.version ]; then
+  tools/fetch-mihomo.sh darwin vendor/mihomo
 fi
+
+VERSION="$(tr -d '[:space:]' < VERSION)"
+# 建置號：1.1.0 → 10100（必須遞增，macOS 用它判斷新舊）
+BUILD_NUMBER="$(echo "$VERSION" | awk -F. '{ printf "%d%02d%02d", $1, $2, $3 }')"
 
 # 2. 圖示
 if [ ! -f build/Sky.icns ]; then
@@ -36,7 +31,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$(swift build -c release --show-bin-path)/Sky" "$APP/Contents/MacOS/"
 cp vendor/mihomo "$APP/Contents/Resources/mihomo"
 cp build/Sky.icns "$APP/Contents/Resources/Sky.icns"
-cat > "$APP/Contents/Info.plist" <<'P'
+cat > "$APP/Contents/Info.plist" <<P
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -46,8 +41,8 @@ cat > "$APP/Contents/Info.plist" <<'P'
 <key>CFBundleExecutable</key><string>Sky</string>
 <key>CFBundleIconFile</key><string>Sky</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0.1</string>
-<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleShortVersionString</key><string>${VERSION}</string>
+<key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
 <key>CFBundleDevelopmentRegion</key><string>zh_TW</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
@@ -59,7 +54,16 @@ P
 codesign --force --sign - "$APP/Contents/Resources/mihomo"
 codesign --force --sign - "$APP"
 
-# 4. 安裝並開啟
+# 4. 打包成 zip（發佈用）
+mkdir -p release
+rm -f "release/Sky-${VERSION}-mac-arm64.zip"
+ditto -c -k --keepParent "$APP" "release/Sky-${VERSION}-mac-arm64.zip"
+echo "📦 release/Sky-${VERSION}-mac-arm64.zip"
+
+# 5. 安裝並開啟（CI 或 --no-install 時跳過）
+if [ "${1:-}" = "--no-install" ] || [ -n "${CI:-}" ]; then
+  exit 0
+fi
 osascript -e 'tell application "Sky" to quit' 2>/dev/null || true
 sleep 1
 pkill -x Sky 2>/dev/null || true

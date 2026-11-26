@@ -94,6 +94,29 @@ struct MihomoAPI {
         try await request("/configs", method: "PATCH", body: ["mode": mode])
     }
 
+    /// 直接推送設定內容（背景服務模式：root 核心不讀使用者資料夾的設定檔）
+    func reload(payload: String) async throws {
+        try await request("/configs", method: "PUT", query: ["force": "true"], body: ["path": "", "payload": payload], timeout: 60)
+    }
+
+    func configs() async throws -> [String: Any] {
+        let d = try await request("/configs", timeout: 2)
+        return (try JSONSerialization.jsonObject(with: d) as? [String: Any]) ?? [:]
+    }
+
+    /// App 結束時用：同步送出 PATCH /configs，最多等 1.5 秒
+    func patchSync(_ body: [String: Any]) {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/configs") else { return }
+        var r = URLRequest(url: url, timeoutInterval: 1.5)
+        r.httpMethod = "PATCH"
+        r.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        let done = DispatchSemaphore(value: 0)
+        MihomoAPI.session.dataTask(with: r) { _, _, _ in done.signal() }.resume()
+        _ = done.wait(timeout: .now() + 1.5)
+    }
+
     func reload(path: String) async throws {
         try await request("/configs", method: "PUT", query: ["force": "true"], body: ["path": path], timeout: 60)
     }

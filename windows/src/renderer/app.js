@@ -654,7 +654,14 @@ function Settings({ s }) {
           <div class="hr"></div>
           <div class="row"><span class="grow" style="font-size:17px">控制埠（API）</span><input class="field" style="width:120px" value=${cpt} onInput=${(e) => setCp(e.target.value)} /></div>
           <div class="hr"></div>
-          <${ToggleRow} title="允許區域網路連線" hint="讓同一個網路的手機、電視也能用這台電腦的代理" on=${st.allowLan} onChange=${(v) => act('setSettings', { allowLan: v })} />
+          <${ToggleRow} title="允許區域網路連線" hint="讓同一個網路的手機、電視也能用這台電腦的代理（需要帳號密碼，本機免密碼）" on=${st.allowLan} onChange=${(v) => act('setSettings', { allowLan: v })} />
+          ${st.allowLan && html`<div style="background:var(--field);border-radius:9px;padding:12px">
+            <${Info} k="代理埠" v=${String(st.mixedPort)} />
+            <${Info} k="帳號" v=${st.lanUser} />
+            <${Info} k="密碼" v=${st.lanPassword} />
+            <div class="row" style="gap:10px;margin-top:6px">
+              <button class="btn sm" onClick=${() => act('copyText', `${st.lanUser}:${st.lanPassword}`)}>複製帳號密碼</button>
+              <button class="btn sm" onClick=${() => act('regenerateLanPassword')}>重新產生密碼</button></div></div>`}
           <div class="hr"></div>
           <label class="lbl">延遲測試網址</label><input class="field" value=${url} onInput=${(e) => setUrl(e.target.value)} />
           <div class="row"><span class="grow"></span><button class="btn primary" onClick=${applyNet}>套用</button></div>
@@ -681,6 +688,9 @@ function Settings({ s }) {
             <button class="btn sm" onClick=${() => act('restartCore')}>重新啟動核心</button>
             <button class="btn sm" onClick=${async () => setLog(await act('tailLog', 400))}>查看日誌</button>
             <button class="btn sm" onClick=${() => act('openWorkDir')}>打開設定資料夾</button></div>
+          <div class="hr"></div>
+          <div class="row"><div class="grow"><div style="font-size:16px">重設系統代理</div><div class="mute" style="font-size:12px;margin-top:4px">Sky 異常結束後網路不通時，按這裡關掉系統代理</div></div>
+            <button class="btn sm" onClick=${() => act('resetSystemProxy')}>重設</button></div>
         <//>
         <${Section} title="關於"><${Info} k="設定資料夾" v=${s.workDir} /><//>
       </div>

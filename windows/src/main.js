@@ -36,6 +36,11 @@ const DEFAULT_RULES = [
   ['IP-CIDR', '172.16.0.0/12', '直連'], ['IP-CIDR', '192.168.0.0/16', '直連'], ['DOMAIN-SUFFIX', 'cn', '直連'],
 ].map(([type, payload, policy]) => ({ id: crypto.randomUUID(), type, payload, policy, enabled: true }));
 
+function randomPassword() {
+  const chars = 'abcdefghijkmnpqrstuvwxyz23456789';
+  return Array.from(crypto.randomBytes(12), (b) => chars[b % chars.length]).join('');
+}
+
 function defaultStore() {
   return {
     subscriptions: [], rules: DEFAULT_RULES, localLinks: [], favorites: [],
@@ -44,6 +49,7 @@ function defaultStore() {
       allowLan: false, autoConnect: false, logLevel: 'info', mode: 'rule', defaultPolicy: '代理',
       testURL: 'https://www.gstatic.com/generate_204', tun: false, autoCheckUpdates: true,
       ssidEnabled: false, ssidRules: [],
+      lanUser: 'sky', lanPassword: randomPassword(),
     },
   };
 }
@@ -302,7 +308,11 @@ async function loop() {
     n++;
     pushLive();                  // 每秒只送流量與連線
     if (changed) push();         // 節點資料有變才送完整狀態
-    await new Promise((r) => setTimeout(r, 1000));
+    // 視窗看得到每秒更新；縮到系統匣時每 5 秒一次（計數器照秒數前進）
+    const visible = win && !win.isDestroyed() && win.isVisible() && !win.isMinimized();
+    const step = visible ? 1 : 5;
+    n += step - 1;
+    await new Promise((r) => setTimeout(r, step * 1000));
   }
 }
 
@@ -546,7 +556,10 @@ async function checkUpdates({ silent = false } = {}) {
       const want = IS_WIN ? `mihomo-windows-amd64-compatible-${rel.tag_name}.zip` : `mihomo-darwin-arm64-${rel.tag_name}.gz`;
       const asset = (rel.assets || []).find((a) => a.name === want);
       if (S.coreVersion && cmpVersion(rel.tag_name, S.coreVersion) > 0 && asset) {
-        S.coreUpdate = { version: rel.tag_name, url: asset.browser_download_url, name: asset.name };
+        // 沒有官方雜湊值就不提供更新，避免裝到被調包的核心
+        if (/^sha256:[0-9a-f]{64}$/i.test(asset.digest || '')) {
+          S.coreUpdate = { version: rel.tag_name, url: asset.browser_download_url, name: asset.name, sha256: asset.digest.slice(7).toLowerCase() };
+        } else { S.coreUpdate = null; errors.push(`mihomo：新版 ${rel.tag_name} 沒有提供 SHA-256，略過`); }
       } else S.coreUpdate = null;
     } catch (e) { errors.push('mihomo：' + e.message); }
   } finally {
@@ -571,10 +584,15 @@ async function updateCore() {
     const res = await net.fetch(u.url);
     if (!res.ok) throw new Error('下載失敗 HTTP ' + res.status);
     const archive = path.join(tmp, u.name);
-    fs.writeFileSync(archive, Buffer.from(await res.arrayBuffer()));
+    const buf = Buffer.from(await res.arrayBuffer());
+    // 比對官方 SHA-256，不符就拒絕
+    if (crypto.createHash('sha256').update(buf).digest('hex') !== u.sha256) throw new Error('SHA-256 不符，已拒絕安裝（可能被調包）');
+    fs.writeFileSync(archive, buf);
     let exe;
     if (IS_WIN) {
-      const r = cp.spawnSync('powershell.exe', ['-NoProfile', '-Command', `Expand-Archive -Force -LiteralPath '${archive}' -DestinationPath '${tmp}'`], { windowsHide: true });
+      // PowerShell 單引號字串裡的 ' 要寫成 ''，否則使用者名稱含 ' 時會失敗
+      const psq = (x) => "'" + String(x).replace(/'/g, "''") + "'";
+      const r = cp.spawnSync('powershell.exe', ['-NoProfile', '-Command', `Expand-Archive -Force -LiteralPath ${psq(archive)} -DestinationPath ${psq(tmp)}`], { windowsHide: true });
       if (r.status !== 0) throw new Error('解壓縮失敗');
       exe = fs.readdirSync(tmp).map((f) => path.join(tmp, f)).find((f) => f.endsWith('.exe'));
     } else {
@@ -794,6 +812,8 @@ const act = {
   setLaunchAtLogin(on) { app.setLoginItemSettings({ openAtLogin: on }); push(); },
   launchAtLogin() { return app.getLoginItemSettings().openAtLogin; },
   restartCore,
+  async resetSystemProxy() { await sysproxy.disable(); S.systemProxyOn = false; if (!S.tunActive) S.connectedSince = null; toast('已關閉系統代理'); push(); },
+  regenerateLanPassword() { store.settings.lanPassword = randomPassword(); saveStore(); return applyConfig(); },
   setTun,
   openWorkDir() { shell.openPath(workDir); },
   tailLog,
@@ -816,6 +836,37 @@ app.on('second-instance', showWindow);
 // macOS 點 Dock 圖示、或重新開啟 App 時顯示主視窗
 app.on('activate', showWindow);
 
+// ---------- 守門程式：App 異常結束時關掉系統代理 ----------
+/** 另開一個獨立的背景程式等 Sky 結束；如果系統代理還指著 Sky 的埠口、而且埠口已經沒有核心在聽，就把它關掉，避免整台電腦斷網 */
+function startWatchdog() {
+  const pid = process.pid, port = store.settings.mixedPort;
+  if (IS_WIN) {
+    const KEY = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
+    const ps = `while (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 3 }; ` +
+      `if ((Test-NetConnection 127.0.0.1 -Port ${port} -WarningAction SilentlyContinue -InformationLevel Quiet)) { exit }; ` +
+      `$k = Get-ItemProperty -Path '${KEY}'; ` +
+      `if ($k.ProxyEnable -eq 1 -and $k.ProxyServer -eq '127.0.0.1:${port}') { Set-ItemProperty -Path '${KEY}' -Name ProxyEnable -Value 0; ${sysproxy.REFRESH_PS} }`;
+    cp.spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', ps],
+      { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  } else {
+    const sh = `while kill -0 ${pid} 2>/dev/null; do sleep 3; done; nc -z 127.0.0.1 ${port} 2>/dev/null && exit 0; ` +
+      `/usr/sbin/networksetup -listallnetworkservices | tail -n +2 | grep -v '^\\*' | while IFS= read -r s; do ` +
+      `i="$(/usr/sbin/networksetup -getwebproxy "$s")"; if echo "$i" | grep -q 'Enabled: Yes' && echo "$i" | grep -q 'Port: ${port}$'; then ` +
+      `/usr/sbin/networksetup -setwebproxystate "$s" off; /usr/sbin/networksetup -setsecurewebproxystate "$s" off; /usr/sbin/networksetup -setsocksfirewallproxystate "$s" off; fi; done`;
+    cp.spawn('/bin/sh', ['-c', sh], { detached: true, stdio: 'ignore' }).unref();
+  }
+}
+
+// ---------- CI 冒煙測試：SKY_SMOKE=<結果檔> 時啟動核心、寫結果後結束 ----------
+async function smokeTest(out) {
+  const result = { coreReady: S.coreReady, coreVersion: S.coreVersion, coreError: S.coreError };
+  try { result.proxies = Object.keys((await api('/proxies')).proxies).length; } catch (e) { result.apiError = e.message; }
+  fs.writeFileSync(out, JSON.stringify(result, null, 2));
+  quitting = true;
+  await stopCore();
+  app.exit(S.coreReady ? 0 : 1);
+}
+
 app.whenReady().then(async () => {
   app.setAppUserModelId('com.onsunday.sky');
   S.isAdmin = await sysproxy.isAdmin();
@@ -824,6 +875,8 @@ app.whenReady().then(async () => {
   killStale();
   migrateSubscriptions();
   await startCore();
+  if (process.env.SKY_SMOKE) return smokeTest(process.env.SKY_SMOKE);
+  startWatchdog();
   loop();
   autoUpdateSubscriptions();
   if (store.settings.ssidEnabled) checkSSID(true).catch(() => {});

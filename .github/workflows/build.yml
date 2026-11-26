@@ -1,0 +1,114 @@
+# 自動測試與發佈
+# - 推送到 main、開 PR：跑 Mac 與 Windows 的測試並建置
+# - 推送版本標籤（v1.2.3）：另外檢查版本號一致，建置完成後上傳到 GitHub Release
+name: 建置與發佈
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    name: Mac 版（測試＋建置）
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 使用最新的 Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)" && swift --version
+
+      - name: 版本號一致（只在版本標籤時檢查）
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          test "$v" = "$(tr -d '[:space:]' < VERSION)" || { echo "標籤 $v 與 VERSION 不一致"; exit 1; }
+          test "$v" = "$(node -p "require('./windows/package.json').version")" || { echo "標籤 $v 與 windows/package.json 不一致"; exit 1; }
+
+      - name: 下載並驗證 mihomo 官方核心
+        run: tools/fetch-mihomo.sh darwin vendor/mihomo
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 單元測試
+        run: swift test
+
+      - name: 建置並打包
+        run: ./build.sh --no-install
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: release/*.zip
+
+  windows:
+    name: Windows 版（測試＋建置＋實際啟動）
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: windows/package-lock.json
+
+      - name: 下載並驗證 mihomo 官方核心
+        run: tools/fetch-mihomo.sh windows windows/vendor/mihomo.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 安裝依賴
+        working-directory: windows
+        run: npm ci
+
+      - name: 單元測試
+        working-directory: windows
+        run: npm test
+
+      - name: 建置安裝檔（在 Windows 上可以寫入程式圖示）
+        working-directory: windows
+        run: npx electron-builder --win --x64 --publish never -c.win.signAndEditExecutable=true
+
+      - name: 實際啟動 App，確認 mihomo 核心能跑起來
+        working-directory: windows
+        run: |
+          home="$RUNNER_TEMP/skyhome"
+          mkdir -p "$home"
+          echo '{"settings":{"mixedPort":17931,"controllerPort":19931,"secret":"ci"}}' > "$home/state.json"
+          SKY_HOME="$(cygpath -w "$home")" SKY_SMOKE="$(cygpath -w "$home/smoke.json")" timeout 120 ./dist/win-unpacked/Sky.exe || true
+          cat "$home/smoke.json"
+          node -e "const r=require(process.argv[1]); if(!r.coreReady){console.error('核心沒有啟動');process.exit(1)}" "$home/smoke.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            windows/dist/*.exe
+            windows/dist/*.zip
+
+  release:
+    name: 上傳到 Release
+    needs: [mac, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: 建立 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes" ]; then args=(--notes-file "$notes"); else args=(--generate-notes); fi
+          gh release create "$GITHUB_REF_NAME" --title "Sky ${GITHUB_REF_NAME#v}" "${args[@]}" \
+            dist/mac/*.zip dist/windows/*.exe dist/windows/*.zip

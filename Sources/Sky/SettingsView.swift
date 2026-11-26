@@ -47,10 +47,34 @@ struct SettingsView: View {
                                 Text("控制埠（API）").font(.system(size: 17))
                                 Spacer()
                                 TextField("9099", text: $controllerPort).skyField().frame(width: 120)
+                                    .disabled(s.daemonMode)
+                                    .help(s.daemonMode ? "TUN 背景服務啟用中，控制埠固定；要改請先移除背景服務" : "")
                             }
                             Divider().overlay(T.line)
                             toggleRow("允許區域網路連線", Binding(get: { s.store.settings.allowLan }, set: { s.store.settings.allowLan = $0; Task { await s.applyConfig() } }),
-                                      hint: "讓同一個網路的手機、電視也能用這台 Mac 的代理")
+                                      hint: "讓同一個網路的手機、電視也能用這台 Mac 的代理（需要帳號密碼，本機免密碼）")
+                            if s.store.settings.allowLan {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    InfoRow(label: "代理位址", value: "\(lanIP() ?? "本機 IP"):\(s.store.settings.mixedPort)")
+                                    InfoRow(label: "帳號", value: s.store.settings.lanUser)
+                                    InfoRow(label: "密碼", value: s.store.settings.lanPassword)
+                                    HStack(spacing: 10) {
+                                        Button("複製帳號密碼") {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString("\(s.store.settings.lanUser):\(s.store.settings.lanPassword)", forType: .string)
+                                            s.showToast("已複製")
+                                        }
+                                        .buttonStyle(GhostButton(compact: true))
+                                        Button("重新產生密碼") {
+                                            s.store.settings.lanPassword = AppSettings.randomPassword()
+                                            Task { await s.applyConfig() }
+                                        }
+                                        .buttonStyle(GhostButton(compact: true))
+                                    }
+                                }
+                                .padding(12)
+                                .background(T.field, in: RoundedRectangle(cornerRadius: 9))
+                            }
                             Divider().overlay(T.line)
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("延遲測試網址").font(.system(size: 17))
@@ -134,6 +158,15 @@ struct SettingsView: View {
                                 Button("查看日誌") { showLog = true }.buttonStyle(GhostButton(compact: true))
                                 Button("打開設定資料夾") { NSWorkspace.shared.open(s.workDir) }.buttonStyle(GhostButton(compact: true))
                             }
+                            Divider().overlay(T.line)
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("重設系統代理").font(.system(size: 16))
+                                    Text("Sky 異常結束後網路不通時，按這裡關掉所有系統代理").font(.system(size: 12)).foregroundColor(T.mute)
+                                }
+                                Spacer()
+                                Button("重設") { s.resetSystemProxy() }.buttonStyle(GhostButton(compact: true))
+                            }
                         }
 
                         section("增強模式（TUN）") {
@@ -146,11 +179,24 @@ struct SettingsView: View {
                                 if s.tunActive { Tag(text: "已啟用", kind: .green, icon: "shield") }
                                 else { Tag(text: "未啟用", kind: .gray) }
                             }
-                            HStack {
-                                Text(s.core.isTunAuthorized ? "核心已授權" : "核心尚未授權").font(.system(size: 15)).foregroundColor(T.mute)
-                                Spacer()
-                                if s.core.isTunAuthorized {
-                                    Button("移除授權") { Task { await s.revokeTun() } }.buttonStyle(GhostButton(compact: true))
+                            if s.core.hasLegacySetuid && !s.daemonMode {
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(T.amber)
+                                    Text("偵測到舊版的 setuid 授權，任何程式都能利用它取得最高權限，建議升級為背景服務。")
+                                        .font(.system(size: 13)).foregroundColor(T.text.opacity(0.85))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                HStack(spacing: 10) {
+                                    Button("升級授權") { Task { await s.upgradeLegacyTun() } }.buttonStyle(PrimaryButton())
+                                    Button("移除舊授權") { Task { await s.revokeTun() } }.buttonStyle(GhostButton(compact: true))
+                                }
+                            } else {
+                                HStack {
+                                    Text(s.daemonMode ? "TUN 背景服務已安裝" : "TUN 背景服務尚未安裝").font(.system(size: 15)).foregroundColor(T.mute)
+                                    Spacer()
+                                    if s.daemonMode {
+                                        Button("移除背景服務") { Task { await s.revokeTun() } }.buttonStyle(GhostButton(compact: true))
+                                    }
                                 }
                             }
                         }
@@ -211,6 +257,25 @@ struct SettingsView: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .background(T.pillBG, in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    /// 這台 Mac 在區域網路的 IPv4 位址（en0 / en1）
+    private func lanIP() -> String? {
+        var addr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addr) == 0, let first = addr else { return nil }
+        defer { freeifaddrs(addr) }
+        var p: UnsafeMutablePointer<ifaddrs>? = first
+        while let cur = p {
+            let ifa = cur.pointee
+            let name = String(cString: ifa.ifa_name)
+            if ifa.ifa_addr.pointee.sa_family == UInt8(AF_INET), name == "en0" || name == "en1" {
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                getnameinfo(ifa.ifa_addr, socklen_t(ifa.ifa_addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+                return String(cString: host)
+            }
+            p = ifa.ifa_next
+        }
+        return nil
     }
 
     private func toggleRow(_ title: String, _ b: Binding<Bool>, hint: String? = nil) -> some View {

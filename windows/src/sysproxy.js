@@ -73,4 +73,4 @@ async function isAdmin() {
   return ok;
 }
 
-module.exports = { enable, disable, isPointing, isAdmin, run };
+module.exports = { enable, disable, isPointing, isAdmin, run, REFRESH_PS };

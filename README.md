@@ -33,25 +33,45 @@ App 沒有經過 Apple／Microsoft 付費簽章，系統會擋：
 
 ### TUN 模式
 
-- **macOS**：第一次開啟時輸入一次管理員密碼，Sky 會把核心安裝到 `/Library/Application Support/Sky/` 並授權建立虛擬網卡；「設定」裡可以移除授權。
+- **macOS**：第一次開啟時輸入一次管理員密碼，Sky 會安裝系統背景服務（LaunchDaemon `com.onsunday.sky.core`），由它以 root 執行 mihomo。核心與工作資料夾（`/Library/Application Support/Sky/`）都屬於 root，Sky 只透過本機 API 推送設定。「設定」裡可以移除背景服務。
+  - 1.0.x 版用 setuid 授權，有提權風險；更新到 1.1.0 後第一次啟動會提示升級，舊檔案會被刪除。
 - **Windows**：需要以系統管理員身分執行，開啟時 Sky 會自動以系統管理員身分重新啟動。
 
+### 區域網路
+
+開啟「允許區域網路連線」後，同網路的手機、電視可以把代理設成這台電腦的 IP 與混合埠，但一定要輸入 Sky 產生的帳號密碼（在「設定 → 網路」）；本機程式免密碼。
+
 ## 從原始碼建置
+
+mihomo 核心一律從[官方 Release](https://github.com/MetaCubeX/mihomo/releases) 下載，並比對 GitHub 提供的 SHA-256：
+
+```bash
+tools/fetch-mihomo.sh darwin vendor/mihomo                 # Mac 版核心
+tools/fetch-mihomo.sh windows windows/vendor/mihomo.exe    # Windows 版核心
+```
 
 **macOS**（需要 Xcode / Swift 5.9 以上）：
 
 ```bash
-./build.sh   # 下載 mihomo、編譯、打包並安裝到 /Applications
+swift test                 # 單元測試
+./build.sh                 # 編譯、打包成 release/*.zip 並安裝到 /Applications
+./build.sh --no-install    # 只打包不安裝
 ```
 
 **Windows**（在 macOS 或 Windows 上都能打包，需要 Node.js）：
 
 ```bash
 cd windows
-npm install
-# 下載 mihomo-windows-amd64-compatible 並放到 windows/vendor/mihomo.exe
-npx electron-builder --win --x64   # 產出 windows/dist/
+npm ci
+npm test                             # 單元測試（與 Mac 版共用 Tests/fixtures）
+npx electron-builder --win --x64     # 產出 windows/dist/
 ```
+
+### 發佈新版
+
+1. 改 `VERSION` 與 `windows/package.json` 的 `version`（兩者要一致）
+2. 在 `release-notes/v<版本>.md` 寫發佈說明
+3. 推送標籤 `git tag v<版本> && git push origin v<版本>`，GitHub Actions 會測試、建置並上傳到 Release
 
 ## 資料位置
 

@@ -1,11 +1,13 @@
 import AppKit
+import CryptoKit
 import Foundation
 
-struct GHAsset: Decodable { let name: String; let browser_download_url: String }
+/// digest 是 GitHub 提供的 "sha256:..."（2025 年中以後上傳的檔案都有）
+struct GHAsset: Decodable { let name: String; let browser_download_url: String; let digest: String? }
 struct GHRelease: Decodable { let tag_name: String; let html_url: String; let body: String?; let assets: [GHAsset] }
 
 struct AppUpdate { let version: String; let url: String; let notes: String }
-struct CoreUpdate { let version: String; let url: String; let name: String }
+struct CoreUpdate { let version: String; let url: String; let name: String; let sha256: String }
 
 enum Updater {
     static let appRepo = "X1-1U/sky"
@@ -74,7 +76,13 @@ extension AppState {
             let want = "mihomo-darwin-arm64-\(rel.tag_name).gz"
             if !coreVersion.isEmpty, Updater.compare(rel.tag_name, coreVersion) > 0,
                let a = rel.assets.first(where: { $0.name == want }) {
-                coreUpdate = CoreUpdate(version: rel.tag_name, url: a.browser_download_url, name: a.name)
+                // 沒有官方雜湊值就不提供更新，避免裝到被調包的核心
+                if let d = a.digest, d.hasPrefix("sha256:") {
+                    coreUpdate = CoreUpdate(version: rel.tag_name, url: a.browser_download_url, name: a.name, sha256: String(d.dropFirst(7)))
+                } else {
+                    coreUpdate = nil
+                    errors.append("mihomo：新版 \(rel.tag_name) 沒有提供 SHA-256，略過")
+                }
             } else { coreUpdate = nil }
         } catch { errors.append("mihomo：\(error.localizedDescription)") }
         if !silent {
@@ -112,6 +120,11 @@ extension AppState {
             guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw APIError(status: (resp as? HTTPURLResponse)?.statusCode ?? 0, body: "下載失敗") }
             let gz = tmp.appendingPathComponent(u.name)
             try fm.moveItem(at: file, to: gz)
+            // 比對官方 SHA-256，不符就拒絕
+            let hash = SHA256.hash(data: try Data(contentsOf: gz)).map { String(format: "%02x", $0) }.joined()
+            guard hash == u.sha256.lowercased() else {
+                throw APIError(status: 0, body: "SHA-256 不符，已拒絕安裝（可能被調包）")
+            }
             let exe = tmp.appendingPathComponent("mihomo")
             // gunzip -c 檔案 > mihomo
             let p = Process()
@@ -132,14 +145,16 @@ extension AppState {
             let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             guard v.terminationStatus == 0, out.contains("Mihomo") else { throw APIError(status: 0, body: "新核心無法執行") }
 
-            core.stop()
             try fm.createDirectory(at: core.updatedBinary.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? fm.removeItem(at: core.updatedBinary)
             try fm.copyItem(at: exe, to: core.updatedBinary)
-            if core.isTunAuthorized {
-                // TUN 授權版也要換成新的，需要再輸入一次密碼
-                let r = core.authorizeTun(from: core.updatedBinary)
-                if !r.ok { showToast("TUN 核心沒有更新：\(r.message)") }
+            if daemonMode {
+                // 背景服務用的核心也要換，需要輸入一次管理員密碼
+                let r = core.updateDaemonBinary(from: core.updatedBinary)
+                if !r.ok { showToast("TUN 背景服務的核心沒有更新：\(r.message)") }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            } else {
+                core.stop()
             }
             await startCore()
             if systemProxyOn { await connect() }
@@ -147,33 +162,48 @@ extension AppState {
             showToast("mihomo 已更新到 \(coreVersion)")
         } catch {
             showToast("更新核心失敗：\(error.localizedDescription)")
-            if !core.isRunning { await startCore() }
+            if !daemonMode && !core.isRunning { await startCore() }
         }
     }
 
     // MARK: - TUN
 
+    /// 開 TUN：第一次會安裝背景服務（輸入一次管理員密碼）；之後開關只是重新推送設定
     func setTun(_ on: Bool) async {
-        if on && !core.isTunAuthorized {
+        if on && !daemonMode {
             core.stop()
-            let r = core.authorizeTun()
+            let r = core.installDaemon(controllerPort: store.settings.controllerPort, secret: store.settings.secret)
             if !r.ok {
                 showToast("沒有啟用 TUN：\(r.message)")
                 await startCore()
                 return
             }
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            store.settings.tun = true
+            await startCore()
+        } else {
+            store.settings.tun = on
+            await applyConfig()
         }
-        store.settings.tun = on
-        await restartCore()
+        if systemProxyOn { await connect() }
         showToast(on ? (tunActive ? "TUN 模式已開啟" : "TUN 開啟失敗，請查看日誌") : "TUN 模式已關閉")
     }
 
+    /// 移除背景服務（也會清掉舊版 setuid 核心），改回一般模式
     func revokeTun() async {
         store.settings.tun = false
-        core.stop()
-        let r = core.revokeTun()
+        let r = core.uninstallDaemon()
+        try? await Task.sleep(nanoseconds: 500_000_000)
         await startCore()
         if systemProxyOn { await connect() }
-        showToast(r.ok ? "已移除 TUN 授權" : "移除授權失敗：\(r.message)")
+        showToast(r.ok ? "已移除 TUN 背景服務" : "移除失敗：\(r.message)")
+    }
+
+    /// 設定頁的「升級授權」：把舊版 setuid 核心換成背景服務
+    func upgradeLegacyTun() async {
+        let r = core.installDaemon(controllerPort: store.settings.controllerPort, secret: store.settings.secret)
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        await startCore()
+        showToast(r.ok ? "已升級為 TUN 背景服務" : "升級失敗：\(r.message)")
     }
 }

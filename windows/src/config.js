@@ -52,6 +52,10 @@ find-process-mode: always
 profile:
   store-selected: true
 `;
+  // 開放區域網路時一定要有帳號密碼，否則同網路的人都能免費用你的代理；本機程式免密碼
+  if (st.allowLan) {
+    y += `authentication:\n  - ${q(st.lanUser + ':' + st.lanPassword)}\nskip-auth-prefixes:\n  - 127.0.0.1/8\n  - ::1/128\n`;
+  }
   if (tun) y += 'tun:\n  enable: true\n  stack: mixed\n  auto-route: true\n  auto-detect-interface: true\n  dns-hijack: ["any:53"]\n';
   return y;
 }

@@ -93,6 +93,14 @@ struct AppSettings: Codable, Equatable {
     var mode = "rule"
     var defaultPolicy: RulePolicy = .proxy
     var testURL = "https://www.gstatic.com/generate_204"
+    /// 開放區域網路時，其他裝置連代理用的帳號密碼
+    var lanUser = "sky"
+    var lanPassword = AppSettings.randomPassword()
+
+    static func randomPassword() -> String {
+        let chars = Array("abcdefghijkmnpqrstuvwxyz23456789")
+        return String((0..<12).map { _ in chars.randomElement()! })
+    }
     var tun = false
     var autoCheckUpdates = true
     var lastUpdateCheck: Double = 0
@@ -112,6 +120,8 @@ struct AppSettings: Codable, Equatable {
         mode = try c.decodeIfPresent(String.self, forKey: .mode) ?? def.mode
         defaultPolicy = try c.decodeIfPresent(RulePolicy.self, forKey: .defaultPolicy) ?? def.defaultPolicy
         testURL = try c.decodeIfPresent(String.self, forKey: .testURL) ?? def.testURL
+        lanUser = try c.decodeIfPresent(String.self, forKey: .lanUser) ?? def.lanUser
+        lanPassword = try c.decodeIfPresent(String.self, forKey: .lanPassword) ?? def.lanPassword
         tun = try c.decodeIfPresent(Bool.self, forKey: .tun) ?? false
         autoCheckUpdates = try c.decodeIfPresent(Bool.self, forKey: .autoCheckUpdates) ?? true
         lastUpdateCheck = try c.decodeIfPresent(Double.self, forKey: .lastUpdateCheck) ?? 0
