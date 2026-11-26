@@ -34,7 +34,8 @@ for a in d["assets"]:
 else:
     sys.exit(f"Release {tag} 裡找不到 {want}")
 PY
-read -r tag name url digest < "$tmp/asset.txt"
+# Windows 上 Python 的輸出行尾是 \r\n，先去掉 \r
+read -r tag name url digest < <(tr -d '\r' < "$tmp/asset.txt")
 
 echo "下載 mihomo ${tag}：${name}"
 curl -fsSL --retry 3 "$url" -o "$tmp/$name"
