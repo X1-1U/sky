@@ -5,6 +5,8 @@ cd "$(dirname "$0")"
 
 # 1. 核心：只用 mihomo 官方 Release，並驗證 SHA-256（tools/fetch-mihomo.sh）
 if [ ! -x vendor/mihomo ] || [ ! -f vendor/mihomo.version ]; then
+  # 本機有登入 gh 就帶上憑證，避免 GitHub API 未登入的次數上限
+  [ -z "${GITHUB_TOKEN:-}" ] && command -v gh >/dev/null && export GITHUB_TOKEN="$(gh auth token 2>/dev/null)"
   tools/fetch-mihomo.sh darwin vendor/mihomo
 fi
 

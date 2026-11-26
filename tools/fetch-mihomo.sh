@@ -14,7 +14,10 @@ api="https://api.github.com/repos/$repo/releases/${MIHOMO_VERSION:+tags/}${MIHOM
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-curl -fsSL --retry 3 ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} "$api" -o "$tmp/release.json"
+if ! curl -fsSL --retry 3 ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} "$api" -o "$tmp/release.json"; then
+  echo "查詢 mihomo 發佈資訊失敗（GitHub API 未登入每小時有次數上限，可設定 GITHUB_TOKEN 或先執行 gh auth login）" >&2
+  exit 1
+fi
 
 # 從發佈資訊找出要的檔案、下載網址與雜湊值
 python3 - "$platform" "$tmp/release.json" > "$tmp/asset.txt" <<'PY'
